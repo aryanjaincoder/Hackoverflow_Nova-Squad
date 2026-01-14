@@ -1,6 +1,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
+    <!-- NFC Permissions -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+    
+    <!-- Audio Permissions -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    
+    <!-- Network & Storage -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    
+    <!-- Camera Features -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="true" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <application
       android:name=".MainApplication"
@@ -9,6 +25,7 @@
       android:roundIcon="@mipmap/ic_launcher_round"
       android:allowBackup="false"
       android:theme="@style/AppTheme">
+      
       <activity
         android:name=".MainActivity"
         android:label="@string/app_name"
@@ -16,10 +33,37 @@
         android:launchMode="singleTask"
         android:windowSoftInputMode="adjustResize"
         android:exported="true">
+        
+        <!-- Main Launcher Intent -->
         <intent-filter>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
+        
+        <!-- ✅ NFC INTENT FILTERS - ADD THESE -->
+        
+        <!-- NDEF Discovered (formatted NFC tags) -->
+        <intent-filter>
+            <action android:name="android.nfc.action.NDEF_DISCOVERED"/>
+            <category android:name="android.intent.category.DEFAULT"/>
+        </intent-filter>
+        
+        <!-- TAG Discovered (any NFC tag) -->
+        <intent-filter>
+            <action android:name="android.nfc.action.TAG_DISCOVERED"/>
+            <category android:name="android.intent.category.DEFAULT"/>
+        </intent-filter>
+        
+        <!-- TECH Discovered (specific NFC technologies) -->
+        <intent-filter>
+            <action android:name="android.nfc.action.TECH_DISCOVERED"/>
+        </intent-filter>
+        
+        <!-- Meta-data for NFC tech list -->
+        <meta-data 
+            android:name="android.nfc.action.TECH_DISCOVERED"
+            android:resource="@xml/nfc_tech_filter" />
+        
       </activity>
     </application>
 </manifest>

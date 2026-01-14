@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1079569948368",
+    "project_id": "zenithely",
+    "storage_bucket": "zenithely.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1079569948368:android:923453ca085e61ecd648d5",
+        "android_client_info": {
+          "package_name": "com.myapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBhSBghIcGzXLw51oFAQlWM4y0SXdYHIU0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

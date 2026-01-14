@@ -4,6 +4,8 @@
 
 # Xcode
 #
+FaceDetectionService.ts
+config.ts
 build/
 *.pbxuser
 !default.pbxuser

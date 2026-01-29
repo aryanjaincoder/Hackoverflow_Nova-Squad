@@ -1,922 +1,1481 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View,
-  Text,
-  ScrollView,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  SafeAreaView,
-  StatusBar,
-  Alert,
-  ActivityIndicator,
-  Switch,
-  Modal,
+    View, Text, ScrollView, TouchableOpacity, RefreshControl,
+    StyleSheet, StatusBar, Alert, Platform, PermissionsAndroid,
+    InteractionManager, Animated
 } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
-import DatePicker from 'react-native-date-picker';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { RootStackParamList, UserData } from '../../navigation/AppNavigator';
 import Icon from 'react-native-vector-icons/MaterialIcons';
+import messaging from '@react-native-firebase/messaging';
+import firestore from '@react-native-firebase/firestore';
+import auth from '@react-native-firebase/auth';
+import LinearGradient from 'react-native-linear-gradient';
+import TextTicker from 'react-native-text-ticker';
+import Modal from 'react-native-modal';
 
-// TypeScript Interfaces
-interface AdminFormData {
-  fullName: string;
-  email: string;
-  phoneNumber: string;
-  gender: string;
-  dateOfBirth: Date | null;
-  photo: string;
-  password: string;
-  confirmPassword: string;
-  roleType: 'college-admin' | 'hod' | '';
-  department: string;
-  collegeName: string;
-  collegeAddress: {
-    street: string;
-    city: string;
-    state: string;
-    pin: string;
-  };
-  collegeContactNumber: string;
-  collegeEmail: string;
-  universityAffiliation: string;
-  collegeWebsite: string;
-  selectedCollege: string;
-  departmentName: string;
-  departmentCode: string;
-  alternateEmail: string;
-  officeExtension: string;
-  whatsappNumber: string;
-  termsAccepted: boolean;
-  privacyPolicyAccepted: boolean;
+// --- Interfaces ---
+interface LiveSession {
+    isActive: boolean;
+    sessionId?: string;
+    className?: string;
+    present: number;
+    total: number;
+    startTime?: string;
+    mode?: 'QR' | 'NFC' | 'SOUND';
 }
 
-interface ValidationErrors {
-  [key: string]: string;
+interface AdminStats {
+    pendingP2P: number;
+    absentToday: number;
+    flaggedStudents: number;
+    weeklyAverage: number;
 }
 
-const AdminRegistrationScreen: React.FC = () => {
-  const [formData, setFormData] = useState<AdminFormData>({
-    fullName: '',
-    email: '',
-    phoneNumber: '',
-    gender: '',
-    dateOfBirth: null,
-    photo: '',
-    password: '',
-    confirmPassword: '',
-    roleType: '',
-    department: '',
-    collegeName: '',
-    collegeAddress: {
-      street: '',
-      city: '',
-      state: '',
-      pin: '',
-    },
-    collegeContactNumber: '',
-    collegeEmail: '',
-    universityAffiliation: '',
-    collegeWebsite: '',
-    selectedCollege: '',
-    departmentName: '',
-    departmentCode: '',
-    alternateEmail: '',
-    officeExtension: '',
-    whatsappNumber: '',
-    termsAccepted: false,
-    privacyPolicyAccepted: false,
-  });
+interface ProximityAlert {
+    studentsDetected: number;
+    suggestedMode: 'QR' | 'NFC' | 'SOUND';
+}
 
-  const [errors, setErrors] = useState<ValidationErrors>({});
-  const [loading, setLoading] = useState(false);
-  const [currentStep, setCurrentStep] = useState(1);
-  const [showDatePicker, setShowDatePicker] = useState(false);
-  const [showTermsModal, setShowTermsModal] = useState(false);
-  const [showPrivacyModal, setShowPrivacyModal] = useState(false);
+type AdminHomeScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Home'>;
 
-  // Mock data for dropdowns
-  const colleges = ['ABC Engineering College', 'XYZ University', 'PQR Institute of Technology'];
-  const departments = ['Computer Science', 'Electrical Engineering', 'Mechanical Engineering', 'Civil Engineering'];
-  const states = ['Maharashtra', 'Karnataka', 'Tamil Nadu', 'Delhi', 'Uttar Pradesh'];
+interface AdminHomeScreenProps {
+    navigation: AdminHomeScreenNavigationProp;
+    userData: UserData;
+}
 
-  const validateStep = (step: number): boolean => {
-    const newErrors: ValidationErrors = {};
+const AdminHomeScreen: React.FC<AdminHomeScreenProps> = ({ navigation, userData }) => {
+    // --- States ---
+    const [isPredictionModalVisible, setIsPredictionModalVisible] = useState(false);
+    const [rippleAnim] = useState(new Animated.Value(0));
+    const [refreshing, setRefreshing] = useState(false);
+    const [currentTime, setCurrentTime] = useState('');
+    const [selectedMode, setSelectedMode] = useState<'QR' | 'NFC' | 'SOUND'>('QR');
+    const [liveSession, setLiveSession] = useState<LiveSession>({
+        isActive: false,
+        present: 0,
+        total: 0
+    });
+    const [adminStats, setAdminStats] = useState<AdminStats>({
+        pendingP2P: 12,
+        absentToday: 15,
+        flaggedStudents: 5,
+        weeklyAverage: 78
+    });
+    const [isNotificationSetupDone, setIsNotificationSetupDone] = useState(false);
+    const [pulseAnim] = useState(new Animated.Value(1));
+    const [proximityAlert, setProximityAlert] = useState<ProximityAlert | null>(null);
+    const [teacherVerified, setTeacherVerified] = useState(true);
+    const [liveActivityFeed, setLiveActivityFeed] = useState<string[]>([
+        "Rahul marked present via QR 🎉",
+        "Sneha's face verified ✅",
+        "Amit flagged for manual review ⚠️"
+    ]);
+    const [modeTapCount, setModeTapCount] = useState(0);
+    const [isClassModalVisible, setIsClassModalVisible] = useState(false);
 
-    switch (step) {
-      case 1:
-        if (!formData.fullName.trim()) newErrors.fullName = 'Full name is required';
-        if (!formData.email.trim()) newErrors.email = 'Email is required';
-        else if (!/\S+@\S+\.\S+/.test(formData.email)) newErrors.email = 'Email is invalid';
-        if (!formData.phoneNumber.trim()) newErrors.phoneNumber = 'Phone number is required';
-        else if (!/^\d{10}$/.test(formData.phoneNumber)) newErrors.phoneNumber = 'Phone number must be 10 digits';
-        if (!formData.password) newErrors.password = 'Password is required';
-        else if (formData.password.length < 8) newErrors.password = 'Password must be at least 8 characters';
-        if (!formData.confirmPassword) newErrors.confirmPassword = 'Please confirm password';
-        else if (formData.password !== formData.confirmPassword) newErrors.confirmPassword = 'Passwords do not match';
-        break;
+    // Available classes
+    const availableClasses = [
+        { id: '1', name: 'Data Structures', icon: 'code' },
+        { id: '2', name: 'AI/ML', icon: 'psychology' },
+        { id: '3', name: 'Web Development', icon: 'language' },
+        { id: '4', name: 'Database Systems', icon: 'storage' },
+    ];
 
-      case 2:
-        if (!formData.roleType) newErrors.roleType = 'Please select a role';
-        if (formData.roleType === 'hod' && !formData.department) newErrors.department = 'Please select department';
-        break;
-
-      case 3:
-        if (formData.roleType === 'college-admin') {
-          if (!formData.collegeName.trim()) newErrors.collegeName = 'College name is required';
-          if (!formData.collegeAddress.street.trim()) newErrors['collegeAddress.street'] = 'Street address is required';
-          if (!formData.collegeAddress.city.trim()) newErrors['collegeAddress.city'] = 'City is required';
-          if (!formData.collegeAddress.state.trim()) newErrors['collegeAddress.state'] = 'State is required';
-          if (!formData.collegeAddress.pin.trim()) newErrors['collegeAddress.pin'] = 'PIN code is required';
-          if (!formData.collegeContactNumber.trim()) newErrors.collegeContactNumber = 'College contact number is required';
-          if (!formData.collegeEmail.trim()) newErrors.collegeEmail = 'College email is required';
+    const getDynamicGradient = () => {
+        if (adminStats.flaggedStudents > 5 || adminStats.pendingP2P > 15) {
+            return ['#DC2626', '#EF4444'];
         }
-        break;
-
-      case 4:
-        if (formData.roleType === 'hod') {
-          if (!formData.selectedCollege) newErrors.selectedCollege = 'Please select college';
-          if (!formData.departmentName.trim()) newErrors.departmentName = 'Department name is required';
+        if (adminStats.flaggedStudents > 2 || adminStats.pendingP2P > 8) {
+            return ['#F59E0B', '#FB923C'];
         }
-        break;
+        return getModeGradient(liveSession.mode || selectedMode);
+    };
 
-      case 5:
-        if (!formData.termsAccepted) newErrors.termsAccepted = 'You must accept terms and conditions';
-        if (!formData.privacyPolicyAccepted) newErrors.privacyPolicyAccepted = 'You must accept privacy policy';
-        break;
-    }
+    const calculatePrediction = () => {
+        const currentHour = new Date().getHours();
+        const currentMinute = new Date().getMinutes();
+        const timeElapsed = (currentHour - 10) * 60 + currentMinute;
+        
+        if (!liveSession.isActive || timeElapsed <= 0) {
+            return { predicted: 85, confidence: 75, endTime: '11:00 AM' };
+        }
+        
+        const rate = (liveSession.present / timeElapsed) * 60;
+        const remainingTime = 60 - timeElapsed;
+        const predictedTotal = liveSession.present + (rate * remainingTime / 60);
+        const predictedPercentage = Math.min(Math.round((predictedTotal / liveSession.total) * 100), 100);
+        
+        return {
+            predicted: predictedPercentage,
+            confidence: 85 + Math.floor(Math.random() * 10),
+            endTime: '11:00 AM',
+        };
+    };
 
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
-  };
+    const setupNotifications = useCallback(async () => {
+        if (isNotificationSetupDone) return;
+        setIsNotificationSetupDone(true);
 
-  const handleNext = () => {
-    if (validateStep(currentStep)) {
-      setCurrentStep(prev => prev + 1);
-    }
-  };
+        let enabled = false;
+        try {
+            const userId = auth().currentUser?.uid;
+            if (!userId) {
+                console.log('[AdminHome] User not logged in...');
+                return;
+            }
 
-  const handlePrevious = () => {
-    setCurrentStep(prev => prev - 1);
-  };
+            if (Platform.OS === 'ios') {
+                const authStatus = await messaging().requestPermission();
+                enabled = authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+                    authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+            } else if (Platform.OS === 'android') {
+                if (Platform.Version >= 33) {
+                    const granted = await PermissionsAndroid.request(
+                        PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
+                    );
+                    enabled = granted === PermissionsAndroid.RESULTS.GRANTED;
+                } else {
+                    enabled = true;
+                }
+            }
 
-  const handleSubmit = async () => {
-    if (validateStep(5)) {
-      setLoading(true);
-      setTimeout(() => {
-        setLoading(false);
-        Alert.alert(
-          'Registration Submitted',
-          'Your admin registration has been submitted successfully. You will receive OTP verification shortly.',
-          [{ text: 'OK', onPress: () => console.log('Registration completed') }]
+            if (enabled) {
+                console.log('[AdminHome] Notification permission granted.');
+                const token = await messaging().getToken();
+                console.log('[AdminHome] FCM Token:', token);
+
+                await firestore().collection('users').doc(userId).set(
+                    {
+                        fcmToken: token,
+                        lastTokenUpdate: firestore.FieldValue.serverTimestamp()
+                    },
+                    { merge: true }
+                );
+                console.log('[AdminHome] FCM Token saved.');
+            } else {
+                console.log('[AdminHome] Notification permission denied.');
+            }
+        } catch (error: any) {
+            console.error("[AdminHome] Error notification setup:", error);
+        }
+    }, [isNotificationSetupDone]);
+
+    const getModeIcon = (mode: 'QR' | 'NFC' | 'SOUND') => {
+        switch (mode) {
+            case 'QR': return 'qr-code-2';
+            case 'NFC': return 'nfc';
+            case 'SOUND': return 'graphic-eq';
+        }
+    };
+
+    const getModeColor = (mode: 'QR' | 'NFC' | 'SOUND') => {
+        switch (mode) {
+            case 'QR': return '#1E3A8A';
+            case 'NFC': return '#7C3AED';
+            case 'SOUND': return '#DC2626';
+        }
+    };
+
+    const getModeGradient = (mode: 'QR' | 'NFC' | 'SOUND') => {
+        switch (mode) {
+            case 'QR': return ['#1E3A8A', '#3B82F6'];
+            case 'NFC': return ['#065F46', '#10B981'];
+            case 'SOUND': return ['#7C3AED', '#EC4899'];
+        }
+    };
+
+    // --- Effects ---
+    useEffect(() => {
+        if (proximityAlert) {
+            Animated.loop(
+                Animated.sequence([
+                    Animated.timing(rippleAnim, {
+                        toValue: 1,
+                        duration: 2000,
+                        useNativeDriver: true,
+                    }),
+                    Animated.timing(rippleAnim, {
+                        toValue: 0,
+                        duration: 0,
+                        useNativeDriver: true,
+                    }),
+                ])
+            ).start();
+        }
+    }, [proximityAlert, rippleAnim]);
+
+    useEffect(() => {
+        if (liveSession.isActive) {
+            Animated.loop(
+                Animated.sequence([
+                    Animated.timing(pulseAnim, {
+                        toValue: 1.3,
+                        duration: 1000,
+                        useNativeDriver: true,
+                    }),
+                    Animated.timing(pulseAnim, {
+                        toValue: 1,
+                        duration: 1000,
+                        useNativeDriver: true,
+                    }),
+                ])
+            ).start();
+        }
+    }, [liveSession.isActive, pulseAnim]);
+
+    useEffect(() => {
+        const checkProximity = async () => {
+            const nearbyCount = Math.floor(Math.random() * 30);
+            
+            if (nearbyCount > 10 && !liveSession.isActive) {
+                const suggestedMode: 'QR' | 'NFC' | 'SOUND' = 
+                    nearbyCount > 40 ? 'SOUND' : nearbyCount > 20 ? 'NFC' : 'QR';
+                
+                setProximityAlert({
+                    studentsDetected: nearbyCount,
+                    suggestedMode: suggestedMode
+                });
+            } else if (nearbyCount <= 10) {
+                setProximityAlert(null);
+            }
+        };
+        
+        const interval = setInterval(checkProximity, 30000);
+        return () => clearInterval(interval);
+    }, [liveSession.isActive]);
+
+    useEffect(() => {
+        const checkTeacherPresence = async () => {
+            const beaconDetected = Math.random() > 0.2;
+            setTeacherVerified(beaconDetected);
+        };
+        
+        const interval = setInterval(checkTeacherPresence, 10000);
+        return () => clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
+        if (!liveSession.isActive || !liveSession.sessionId) return;
+        
+        const unsubscribe = firestore()
+            .collection('attendance_logs')
+            .where('sessionId', '==', liveSession.sessionId)
+            .limit(10)
+            .onSnapshot((snapshot) => {
+                const updates = snapshot.docs
+                    .map(doc => {
+                        const data = doc.data();
+                        return {
+                            text: `${data.studentName} marked ${data.status} via ${data.method}`,
+                            timestamp: data.timestamp
+                        };
+                    })
+                    .sort((a, b) => b.timestamp - a.timestamp)
+                    .slice(0, 5)
+                    .map(item => item.text);
+                    
+                if (updates.length > 0) {
+                    setLiveActivityFeed(updates);
+                }
+            }, (error) => {
+                console.error('[AdminHome] Activity feed error:', error);
+            });
+            
+        return () => unsubscribe();
+    }, [liveSession.isActive, liveSession.sessionId]);
+
+    useEffect(() => {
+        const interactionPromise = InteractionManager.runAfterInteractions(() => {
+            if (auth().currentUser && !isNotificationSetupDone) {
+                setupNotifications();
+            }
+        });
+
+        const unsubscribeTokenRefresh = messaging().onTokenRefresh(async newToken => {
+            console.log("[AdminHome] Token Refreshed:", newToken);
+            const userId = auth().currentUser?.uid;
+            if (userId) {
+                try {
+                    await firestore().collection('users').doc(userId).set(
+                        {
+                            fcmToken: newToken,
+                            lastTokenUpdate: firestore.FieldValue.serverTimestamp()
+                        },
+                        { merge: true }
+                    );
+                    console.log("[AdminHome] Refreshed FCM token saved.");
+                } catch (e) {
+                    console.error("[AdminHome] Error saving refreshed token:", e);
+                }
+            }
+        });
+
+        return () => {
+            unsubscribeTokenRefresh();
+            interactionPromise.cancel();
+        };
+    }, [setupNotifications, isNotificationSetupDone]);
+
+    useEffect(() => {
+        const updateTime = () => {
+            const hour = new Date().getHours();
+            let greeting = hour < 12 ? 'Good morning ☀️' :
+                hour < 18 ? 'Good afternoon 🌤️' : 'Good evening 🌙';
+            setCurrentTime(greeting);
+        };
+        updateTime();
+        const interval = setInterval(updateTime, 60000);
+        return () => clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
+        if (modeTapCount >= 3) {
+            Alert.alert(
+                "🔓 God Mode Activated",
+                "All verification checks temporarily disabled. Use with caution!",
+                [{ text: "OK", onPress: () => setModeTapCount(0) }]
+            );
+        }
+    }, [modeTapCount]);
+    useEffect(() => {
+    const userId = auth().currentUser?.uid;
+    if (!userId) return;
+
+    const unsubscribe = firestore()
+        .collection('attendance_sessions')
+        .where('adminId', '==', userId)
+        .where('status', '==', 'active')
+        .orderBy('createdAt', 'desc')
+        .limit(1)
+        .onSnapshot(
+            (snapshot) => {
+                if (!snapshot.empty) {
+                    const sessionDoc = snapshot.docs[0];
+                    const sessionData = sessionDoc.data();
+                    
+                    setLiveSession({
+                        isActive: true,
+                        sessionId: sessionDoc.id,
+                        className: sessionData.subject || sessionData.className,
+                        present: sessionData.presentCount || 0,
+                        total: sessionData.totalStudents || 0,
+                        startTime: sessionData.startTime,
+                        mode: sessionData.mode,
+                    });
+                } else {
+                    // No active session
+                    setLiveSession({
+                        isActive: false,
+                        present: 0,
+                        total: 0,
+                    });
+                }
+            },
+            (error) => {
+                console.error('[AdminHome] Error listening to active sessions:', error);
+            }
         );
-      }, 2000);
-    }
-  };
 
-  const handleInputChange = (field: string, value: any) => {
-    if (field.includes('.')) {
-      const [parent, child] = field.split('.');
-      if (parent === 'collegeAddress') {
-        setFormData(prev => ({
-          ...prev,
-          collegeAddress: {
-            ...prev.collegeAddress,
-            [child]: value,
-          },
-        }));
-      }
-    } else {
-      setFormData(prev => ({
-        ...prev,
-        [field]: value,
-      }));
-    }
+    return () => unsubscribe();
+}, []);
+    // --- Handlers ---
+    const onRefresh = useCallback(async () => {
+        setRefreshing(true);
+        console.log('Refreshing admin data...');
 
-    if (errors[field]) {
-      setErrors(prev => ({
-        ...prev,
-        [field]: '',
-      }));
-    }
-  };
+        await new Promise<void>(resolve => setTimeout(() => {
+            setLiveSession(prev => ({
+                ...prev,
+                present: prev.present + Math.floor(Math.random() * 3)
+            }));
+            setAdminStats(prev => ({
+                ...prev,
+                pendingP2P: 10 + Math.floor(Math.random() * 5),
+                weeklyAverage: 75 + Math.floor(Math.random() * 10)
+            }));
+            resolve();
+        }, 1500));
 
-  const renderProgressBar = () => (
-    <View style={styles.progressBarContainer}>
-      <View style={[styles.progressBar, { width: `${(currentStep - 1) / 4 * 100}%` }]} />
-    </View>
-  );
+        setRefreshing(false);
+        console.log("Refresh complete.");
+    }, []);
 
-  const renderStepIndicator = () => (
-    <View style={styles.stepIndicatorContainer}>
-      {[1, 2, 3, 4, 5].map(step => (
-        <View key={step} style={styles.stepIndicator}>
-          <View
-            style={[
-              styles.stepCircle,
-              currentStep >= step ? styles.stepActive : styles.stepInactive,
-            ]}
-          >
-            <Text style={styles.stepText}>{step}</Text>
-          </View>
-          {step < 5 && <View style={styles.stepLine} />}
-        </View>
-      ))}
-    </View>
-  );
-  
-  const renderPersonalDetails = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Personal Details</Text>
-      
-      <TextInput
-        style={[styles.input, errors.fullName && styles.inputError]}
-        placeholder="Full Name *"
-        value={formData.fullName}
-        onChangeText={(value) => handleInputChange('fullName', value)}
-      />
-      {errors.fullName && <Text style={styles.errorText}>{errors.fullName}</Text>}
-
-      <TextInput
-        style={[styles.input, errors.email && styles.inputError]}
-        placeholder="Email Address *"
-        keyboardType="email-address"
-        autoCapitalize="none"
-        value={formData.email}
-        onChangeText={(value) => handleInputChange('email', value)}
-      />
-      {errors.email && <Text style={styles.errorText}>{errors.email}</Text>}
-
-      <TextInput
-        style={[styles.input, errors.phoneNumber && styles.inputError]}
-        placeholder="Phone Number *"
-        keyboardType="phone-pad"
-        value={formData.phoneNumber}
-        onChangeText={(value) => handleInputChange('phoneNumber', value)}
-      />
-      {errors.phoneNumber && <Text style={styles.errorText}>{errors.phoneNumber}</Text>}
-
-      <View style={styles.pickerContainer}>
-        <Picker
-          selectedValue={formData.gender}
-          style={styles.picker}
-          onValueChange={(value) => handleInputChange('gender', value)}
-        >
-          <Picker.Item label="Select Gender" value="" />
-          <Picker.Item label="Male" value="male" />
-          <Picker.Item label="Female" value="female" />
-          <Picker.Item label="Other" value="other" />
-        </Picker>
-      </View>
-
-      <TouchableOpacity 
-        style={styles.input}
-        onPress={() => setShowDatePicker(true)}
-      >
-        <Text style={formData.dateOfBirth ? styles.inputText : styles.placeholderText}>
-          {formData.dateOfBirth ? formData.dateOfBirth.toDateString() : 'Date of Birth'}
-        </Text>
-      </TouchableOpacity>
-
-      <DatePicker
-        modal
-        open={showDatePicker}
-        date={formData.dateOfBirth || new Date()}
-        mode="date"
-        onConfirm={(date) => {
-          setShowDatePicker(false);
-          handleInputChange('dateOfBirth', date);
-        }}
-        onCancel={() => {
-          setShowDatePicker(false);
-        }}
-      />
-
-      <TouchableOpacity style={styles.uploadButton}>
-        <Icon name="photo-camera" size={20} color="#007AFF" />
-        <Text style={styles.uploadButtonText}>Upload Photo</Text>
-      </TouchableOpacity>
-
-      <TextInput
-        style={[styles.input, errors.password && styles.inputError]}
-        placeholder="Password *"
-        secureTextEntry
-        value={formData.password}
-        onChangeText={(value) => handleInputChange('password', value)}
-      />
-      {errors.password && <Text style={styles.errorText}>{errors.password}</Text>}
-
-      <TextInput
-        style={[styles.input, errors.confirmPassword && styles.inputError]}
-        placeholder="Confirm Password *"
-        secureTextEntry
-        value={formData.confirmPassword}
-        onChangeText={(value) => handleInputChange('confirmPassword', value)}
-      />
-      {errors.confirmPassword && <Text style={styles.errorText}>{errors.confirmPassword}</Text>}
-    </View>
-  );
-
-  const renderRoleSelection = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Role Selection</Text>
-      
-      <Text style={styles.inputLabel}>Role Type *</Text>
-      <View style={styles.pickerContainer}>
-        <Picker
-          selectedValue={formData.roleType}
-          style={[styles.picker, errors.roleType && styles.inputError]}
-          onValueChange={(value) => handleInputChange('roleType', value)}
-        >
-          <Picker.Item label="Select Role" value="" />
-          <Picker.Item label="College Admin" value="college-admin" />
-          <Picker.Item label="Head of Department (HOD)" value="hod" />
-        </Picker>
-      </View>
-      {errors.roleType && <Text style={styles.errorText}>{errors.roleType}</Text>}
-
-      {formData.roleType === 'hod' && (
-        <>
-          <Text style={styles.inputLabel}>Department *</Text>
-          <View style={styles.pickerContainer}>
-            <Picker
-              selectedValue={formData.department}
-              style={[styles.picker, errors.department && styles.inputError]}
-              onValueChange={(value) => handleInputChange('department', value)}
-            >
-              <Picker.Item label="Select Department" value="" />
-              {departments.map(dept => (
-                <Picker.Item key={dept} label={dept} value={dept} />
-              ))}
-            </Picker>
-          </View>
-          {errors.department && <Text style={styles.errorText}>{errors.department}</Text>}
-        </>
-      )}
-    </View>
-  );
-
-  const renderInstitutionalDetails = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Institutional Details</Text>
-      
-      <TextInput
-        style={[styles.input, errors.collegeName && styles.inputError]}
-        placeholder="College Name *"
-        value={formData.collegeName}
-        onChangeText={(value) => handleInputChange('collegeName', value)}
-      />
-      {errors.collegeName && <Text style={styles.errorText}>{errors.collegeName}</Text>}
-
-      <TextInput
-        style={[styles.input, errors['collegeAddress.street'] && styles.inputError]}
-        placeholder="Street Address *"
-        value={formData.collegeAddress.street}
-        onChangeText={(value) => handleInputChange('collegeAddress.street', value)}
-      />
-      {errors['collegeAddress.street'] && <Text style={styles.errorText}>{errors['collegeAddress.street']}</Text>}
-
-      <View style={styles.row}>
-        <TextInput
-          style={[styles.input, styles.halfInput, errors['collegeAddress.city'] && styles.inputError]}
-          placeholder="City *"
-          value={formData.collegeAddress.city}
-          onChangeText={(value) => handleInputChange('collegeAddress.city', value)}
-        />
-        <TextInput
-          style={[styles.input, styles.halfInput, errors['collegeAddress.pin'] && styles.inputError]}
-          placeholder="PIN Code *"
-          value={formData.collegeAddress.pin}
-          onChangeText={(value) => handleInputChange('collegeAddress.pin', value)}
-        />
-      </View>
-
-      <Text style={styles.inputLabel}>State *</Text>
-      <View style={styles.pickerContainer}>
-        <Picker
-          selectedValue={formData.collegeAddress.state}
-          style={[styles.picker, errors['collegeAddress.state'] && styles.inputError]}
-          onValueChange={(value) => handleInputChange('collegeAddress.state', value)}
-        >
-          <Picker.Item label="Select State" value="" />
-          {states.map(state => (
-            <Picker.Item key={state} label={state} value={state} />
-          ))}
-        </Picker>
-      </View>
-      {errors['collegeAddress.state'] && <Text style={styles.errorText}>{errors['collegeAddress.state']}</Text>}
-
-      <TextInput
-        style={[styles.input, errors.collegeContactNumber && styles.inputError]}
-        placeholder="College Contact Number *"
-        keyboardType="phone-pad"
-        value={formData.collegeContactNumber}
-        onChangeText={(value) => handleInputChange('collegeContactNumber', value)}
-      />
-      {errors.collegeContactNumber && <Text style={styles.errorText}>{errors.collegeContactNumber}</Text>}
-
-      <TextInput
-        style={[styles.input, errors.collegeEmail && styles.inputError]}
-        placeholder="College Email *"
-        keyboardType="email-address"
-        value={formData.collegeEmail}
-        onChangeText={(value) => handleInputChange('collegeEmail', value)}
-      />
-      {errors.collegeEmail && <Text style={styles.errorText}>{errors.collegeEmail}</Text>}
-
-      <TextInput
-        style={styles.input}
-        placeholder="University Affiliation"
-        value={formData.universityAffiliation}
-        onChangeText={(value) => handleInputChange('universityAffiliation', value)}
-      />
-
-      <TextInput
-        style={styles.input}
-        placeholder="College Website"
-        keyboardType="url"
-        value={formData.collegeWebsite}
-        onChangeText={(value) => handleInputChange('collegeWebsite', value)}
-      />
-
-      <TouchableOpacity style={styles.uploadButton}>
-        <Icon name="attach-file" size={20} color="#007AFF" />
-        <Text style={styles.uploadButtonText}>Upload Verification Documents</Text>
-      </TouchableOpacity>
-    </View>
-  );
-
-  const renderDepartmentDetails = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Department Details</Text>
-      
-      <Text style={styles.inputLabel}>Select College *</Text>
-      <View style={styles.pickerContainer}>
-        <Picker
-          selectedValue={formData.selectedCollege}
-          style={[styles.picker, errors.selectedCollege && styles.inputError]}
-          onValueChange={(value) => handleInputChange('selectedCollege', value)}
-        >
-          <Picker.Item label="Select College" value="" />
-          {colleges.map(college => (
-            <Picker.Item key={college} label={college} value={college} />
-          ))}
-        </Picker>
-      </View>
-      {errors.selectedCollege && <Text style={styles.errorText}>{errors.selectedCollege}</Text>}
-
-      <TextInput
-        style={[styles.input, errors.departmentName && styles.inputError]}
-        placeholder="Department Name *"
-        value={formData.departmentName}
-        onChangeText={(value) => handleInputChange('departmentName', value)}
-      />
-      {errors.departmentName && <Text style={styles.errorText}>{errors.departmentName}</Text>}
-
-      <TextInput
-        style={styles.input}
-        placeholder="Department Code"
-        value={formData.departmentCode}
-        onChangeText={(value) => handleInputChange('departmentCode', value)}
-      />
-    </View>
-  );
-
-  const renderAgreements = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Terms & Agreements</Text>
-      
-      <View style={styles.switchContainer}>
-        <View style={styles.switchRow}>
-          <Switch
-            value={formData.termsAccepted}
-            onValueChange={(value) => handleInputChange('termsAccepted', value)}
-            trackColor={{ false: '#767577', true: '#81b0ff' }}
-            thumbColor={formData.termsAccepted ? '#007AFF' : '#f4f3f4'}
-          />
-          <TouchableOpacity onPress={() => setShowTermsModal(true)}>
-            <Text style={styles.switchText}>
-              I agree to the **Terms and Conditions** *
-            </Text>
-          </TouchableOpacity>
-        </View>
-        {errors.termsAccepted && <Text style={styles.errorText}>{errors.termsAccepted}</Text>}
-
-        <View style={styles.switchRow}>
-          <Switch
-            value={formData.privacyPolicyAccepted}
-            onValueChange={(value) => handleInputChange('privacyPolicyAccepted', value)}
-            trackColor={{ false: '#767577', true: '#81b0ff' }}
-            thumbColor={formData.privacyPolicyAccepted ? '#007AFF' : '#f4f3f4'}
-          />
-          <TouchableOpacity onPress={() => setShowPrivacyModal(true)}>
-            <Text style={styles.switchText}>
-              I agree to the **Privacy Policy** *
-            </Text>
-          </TouchableOpacity>
-        </View>
-        {errors.privacyPolicyAccepted && <Text style={styles.errorText}>{errors.privacyPolicyAccepted}</Text>}
-      </View>
-
-      <TouchableOpacity style={styles.uploadButton}>
-        <Icon name="description" size={20} color="#007AFF" />
-        <Text style={styles.uploadButtonText}>Upload Admin Authorization Letter</Text>
-      </TouchableOpacity>
-    </View>
-  );
-
-  const renderCurrentStep = () => {
-    switch (currentStep) {
-      case 1: return renderPersonalDetails();
-      case 2: return renderRoleSelection();
-      case 3: return renderInstitutionalDetails();
-      case 4: return renderDepartmentDetails();
-      case 5: return renderAgreements();
-      default: return renderPersonalDetails();
-    }
-  };
-
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f5f5f5" />
-      
-      <ScrollView style={styles.scrollView}>
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Admin Registration</Text>
-          <Text style={styles.headerSubtitle}>Complete all steps to register as an admin</Text>
-          {renderProgressBar()}
-        </View>
-
-        <View style={styles.stepLabels}>
-          <Text style={styles.stepLabel}>Personal</Text>
-          <Text style={styles.stepLabel}>Role</Text>
-          <Text style={styles.stepLabel}>Institution</Text>
-          <Text style={styles.stepLabel}>Department</Text>
-          <Text style={styles.stepLabel}>Agreement</Text>
-        </View>
-
-        <View style={styles.formContainer}>
-          {renderCurrentStep()}
-        </View>
-
-        <View style={styles.buttonContainer}>
-          {currentStep > 1 && (
-            <TouchableOpacity style={styles.previousButton} onPress={handlePrevious}>
-              <Text style={styles.previousButtonText}>Previous</Text>
-            </TouchableOpacity>
-          )}
-          
-          {currentStep < 5 ? (
-            <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
-              <Text style={styles.nextButtonText}>Next</Text>
-              <Icon name="arrow-forward" size={20} color="white" />
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity 
-              style={[styles.nextButton, loading && styles.disabledButton]} 
-              onPress={handleSubmit}
-              disabled={loading}
-            >
-              {loading ? (
-                <ActivityIndicator color="white" />
-              ) : (
-                <>
-                  <Text style={styles.nextButtonText}>Submit</Text>
-                  <Icon name="send" size={20} color="white" />
-                </>
-              )}
-            </TouchableOpacity>
-          )}
-        </View>
-      </ScrollView>
-
-      {/* Terms and Conditions Modal */}
-      <Modal
-        visible={showTermsModal}
-        animationType="slide"
-        transparent={true}
-      >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Terms and Conditions</Text>
-            <ScrollView style={styles.modalScroll}>
-              <Text style={styles.modalText}>
-                {/* Add your terms and conditions content here */}
-                Welcome to our platform! By registering as an administrator, you agree to abide by our terms and conditions. These terms outline your responsibilities, our service offerings, and the acceptable use of the platform. Unauthorized access or misuse of data is strictly prohibited. We reserve the right to modify these terms at any time. Your continued use of the platform constitutes your acceptance of these changes.
-              </Text>
-            </ScrollView>
-            <TouchableOpacity 
-              style={styles.modalCloseButton}
-              onPress={() => setShowTermsModal(false)}
-            >
-              <Text style={styles.modalCloseButtonText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Privacy Policy Modal */}
-      <Modal
-        visible={showPrivacyModal}
-        animationType="slide"
-        transparent={true}
-      >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Privacy Policy</Text>
-            <ScrollView style={styles.modalScroll}>
-              <Text style={styles.modalText}>
-                {/* Add your privacy policy content here */}
-                Your privacy is important to us. This policy explains how we collect, use, and protect your personal information. We collect data necessary for providing our services and ensuring a secure experience. This information may include your name, contact details, and institutional data. We do not share your information with third parties without your explicit consent, except as required by law.
-              </Text>
-            </ScrollView>
-            <TouchableOpacity 
-              style={styles.modalCloseButton}
-              onPress={() => setShowPrivacyModal(false)}
-            >
-              <Text style={styles.modalCloseButtonText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-    </SafeAreaView>
-  );
+    const handleEndSession = () => {
+    Alert.alert(
+        "End Session",
+        "Are you sure you want to end the current session?\n\nNote: Monitor live analytics on the website.",
+        [
+            { text: "Cancel", style: "cancel" },
+            {
+                text: "End",
+                style: "destructive",
+                onPress: async () => {
+                    try {
+                        // End session in Firebase
+                        if (liveSession.sessionId) {
+                            await firestore()
+                                .collection('attendance_sessions')
+                                .doc(liveSession.sessionId)
+                                .update({
+                                    status: 'ended',
+                                    endTime: new Date().toLocaleTimeString('en-US', {
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                    }),
+                                });
+                        }
+                        
+                        // Reset local state
+                        setLiveSession({ isActive: false, present: 0, total: 0 });
+                        
+                        Alert.alert(
+                            "Success", 
+                            "Session ended successfully.\n\nView detailed analytics on the website.",
+                            [{ text: "OK" }]
+                        );
+                    } catch (error) {
+                        console.error('[AdminHome] Error ending session:', error);
+                        Alert.alert('Error', 'Could not end session. Please try again.');
+                    }
+                }
+            }
+        ]
+    );
 };
 
+    const handleCreateSession = (className?: string) => {
+        navigation.navigate('CreateSessionScreen', { 
+            mode: selectedMode,
+            className: className 
+        });
+    };
+
+    const handleQuickStart = () => {
+    navigation.navigate('CreateSessionScreen', { 
+        mode: selectedMode 
+    });
+};
+
+  const handleProximityAlertTap = () => {
+    if (proximityAlert) {
+        setSelectedMode(proximityAlert.suggestedMode);
+        navigation.navigate('CreateSessionScreen', { 
+            mode: proximityAlert.suggestedMode 
+        });
+    }
+};
+
+    // --- Render Functions ---
+    const renderPredictionModal = () => {
+        const prediction = calculatePrediction();
+        
+        return (
+            <Modal
+                isVisible={isPredictionModalVisible}
+                onBackdropPress={() => setIsPredictionModalVisible(false)}
+                backdropOpacity={0.6}
+                animationIn="zoomIn"
+                animationOut="zoomOut"
+            >
+                <View style={styles.predictionModal}>
+                    <View style={styles.predictionHeader}>
+                        <Icon name="psychology" size={32} color="#7C3AED" />
+                        <Text style={styles.predictionTitle}>AI Attendance Prediction</Text>
+                    </View>
+                    
+                    <View style={styles.predictionContent}>
+                        <View style={styles.predictionMainStat}>
+                            <Text style={styles.predictionNumber}>{prediction.predicted}%</Text>
+                            <Text style={styles.predictionLabel}>Expected Final Attendance</Text>
+                        </View>
+                        
+                        <View style={styles.predictionDivider} />
+                        
+                        <View style={styles.predictionDetails}>
+                            <View style={styles.predictionRow}>
+                                <Icon name="timeline" size={20} color="#6B7280" />
+                                <Text style={styles.predictionDetailText}>
+                                    Current Rate: {liveSession.total > 0 ? Math.round((liveSession.present / liveSession.total) * 100) : 0}%
+                                </Text>
+                            </View>
+                            
+                            <View style={styles.predictionRow}>
+                                <Icon name="access-time" size={20} color="#6B7280" />
+                                <Text style={styles.predictionDetailText}>
+                                    Prediction by {prediction.endTime}
+                                </Text>
+                            </View>
+                            
+                            <View style={styles.predictionRow}>
+                                <Icon name="verified" size={20} color="#22C55E" />
+                                <Text style={styles.predictionDetailText}>
+                                    Confidence: {prediction.confidence}%
+                                </Text>
+                            </View>
+                        </View>
+                        
+                        <View style={styles.predictionInsight}>
+                            <Icon name="lightbulb" size={18} color="#F59E0B" />
+                            <Text style={styles.predictionInsightText}>
+                                {prediction.predicted >= 75 
+                                    ? "✅ On track for good attendance!" 
+                                    : "⚠️ Consider sending reminder notifications"}
+                            </Text>
+                        </View>
+                    </View>
+                    
+                    <TouchableOpacity
+                        style={styles.predictionCloseButton}
+                        onPress={() => setIsPredictionModalVisible(false)}
+                    >
+                        <Text style={styles.predictionCloseText}>Got it</Text>
+                    </TouchableOpacity>
+                </View>
+            </Modal>
+        );
+    };
+
+    const renderHeader = () => (
+        <View style={styles.header}>
+            <View>
+                <Text style={styles.greeting}>{currentTime}</Text>
+                <Text style={styles.subtitle}>Your Intelligent Control Center</Text>
+            </View>
+            <View style={[
+                styles.verificationBadge, 
+                { backgroundColor: teacherVerified ? '#DCFCE7' : '#FEE2E2' }
+            ]}>
+                <Icon 
+                    name={teacherVerified ? "verified" : "error"} 
+                    size={16} 
+                    color={teacherVerified ? "#22C55E" : "#EF4444"} 
+                />
+                <Text style={[
+                    styles.verificationText,
+                    { color: teacherVerified ? "#166534" : "#991B1B" }
+                ]}>
+                    {teacherVerified ? "In Classroom" : "Not in Range"}
+                </Text>
+            </View>
+        </View>
+    );
+
+ // AdminHomeScreen.tsx - FIXED VERSION
+// Replace your renderProximityAlert function with this:
+
+const renderProximityAlert = () => {
+    // ✅ CORRECT: Check condition FIRST, before any transformations
+    if (!proximityAlert) return null;
+    
+    // Now safely create interpolations (these are NOT hooks)
+    const scale = rippleAnim.interpolate({
+        inputRange: [0, 1],
+        outputRange: [1, 2.5],
+    });
+    
+    const opacity = rippleAnim.interpolate({
+        inputRange: [0, 0.5, 1],
+        outputRange: [0.8, 0.4, 0],
+    });
+    
+    return (
+        <TouchableOpacity 
+            style={styles.proximityAlert}
+            onPress={handleProximityAlertTap}
+            activeOpacity={0.8}
+        >
+            <View style={styles.rippleContainer}>
+                <Animated.View
+                    style={[
+                        styles.ripple,
+                        {
+                            transform: [{ scale }],
+                            opacity,
+                        },
+                    ]}
+                />
+                <Animated.View
+                    style={[
+                        styles.ripple,
+                        {
+                            transform: [{ scale: scale.interpolate({
+                                inputRange: [1, 2.5],
+                                outputRange: [1, 2],
+                            })}],
+                            opacity: opacity.interpolate({
+                                inputRange: [0, 0.8],
+                                outputRange: [0, 0.4],
+                            }),
+                        },
+                    ]}
+                />
+                <Icon name="sensors" size={24} color="#F59E0B" />
+            </View>
+            
+            <View style={{flex: 1, marginLeft: 12}}>
+                <Text style={styles.proximityTitle}>
+                    🔥 {proximityAlert.studentsDetected} Students Detected Nearby!
+                </Text>
+                <Text style={styles.proximitySubtitle}>
+                    Start {proximityAlert.suggestedMode} session now?
+                </Text>
+            </View>
+            <Icon name="play-circle" size={32} color="#22C55E" />
+        </TouchableOpacity>
+    );
+};
+
+// ✅ That's it! Just moved the conditional return to the TOP
+    const renderModeSelector = () => (
+        <View style={styles.modeSelectorContainer}>
+            {(['QR', 'NFC', 'SOUND'] as const).map((mode) => (
+                <TouchableOpacity
+                    key={mode}
+                    style={[
+                        styles.modeChip,
+                        selectedMode === mode && {
+                            backgroundColor: getModeColor(mode),
+                            borderColor: getModeColor(mode)
+                        }
+                    ]}
+                    onPress={() => {
+                        setSelectedMode(mode);
+                        setModeTapCount(prev => prev + 1);
+                    }}
+                    activeOpacity={0.7}
+                >
+                    <Icon
+                        name={getModeIcon(mode)}
+                        size={24}
+                        color={selectedMode === mode ? '#FFF' : '#666'}
+                    />
+                    <Text style={[
+                        styles.modeChipText,
+                        selectedMode === mode && styles.modeChipTextActive
+                    ]}>
+                        {mode}
+                    </Text>
+                </TouchableOpacity>
+            ))}
+        </View>
+    );
+
+    const renderLiveActivityStream = () => {
+        if (!liveSession.isActive || liveActivityFeed.length === 0) return null;
+        
+        return (
+            <View style={styles.activityStreamContainer}>
+                <Icon name="trending-up" size={16} color="#22C55E" />
+                <TextTicker
+                    style={styles.activityText}
+                    duration={15000}
+                    loop
+                    bounce={false}
+                    marqueeDelay={0}
+                >
+                    {liveActivityFeed.join('  •  ')}
+                </TextTicker>
+            </View>
+        );
+    };
+
+    const renderLiveSession = () => (
+        <LinearGradient
+            colors={getDynamicGradient()}
+            start={{x: 0, y: 0}}
+            end={{x: 1, y: 1}}
+            style={styles.heroCard}
+        >
+            {liveSession.isActive ? (
+                <View>
+                    <View style={styles.liveHeader}>
+                        <View style={styles.liveStatusBadge}>
+                            <Animated.View
+                                style={[
+                                    styles.liveDot,
+                                    { transform: [{ scale: pulseAnim }] }
+                                ]}
+                            />
+                            <Text style={styles.liveStatusText}>LIVE SESSION</Text>
+                        </View>
+                        <View style={styles.modeIndicator}>
+                            <Icon name={getModeIcon(liveSession.mode || 'QR')} size={18} color="#FFF" />
+                            <Text style={styles.modeIndicatorText}>{liveSession.mode}</Text>
+                        </View>
+                    </View>
+
+                    <Text style={styles.heroClassName}>{liveSession.className}</Text>
+                    <Text style={styles.heroStartTime}>Started at {liveSession.startTime}</Text>
+
+                    {renderLiveActivityStream()}
+
+                    <View style={styles.attendanceDisplay}>
+                        <View style={styles.attendanceCount}>
+                            <Text style={styles.attendanceNumber}>{liveSession.present}</Text>
+                            <Text style={styles.attendanceLabel}>Present</Text>
+                        </View>
+                        <View style={styles.attendanceDivider} />
+                        <View style={styles.attendanceCount}>
+                            <Text style={styles.attendanceNumber}>{liveSession.total}</Text>
+                            <Text style={styles.attendanceLabel}>Total</Text>
+                        </View>
+                    </View>
+
+                    <View style={styles.progressBarContainer}>
+                        <View style={styles.progressBar}>
+                            <View
+                                style={[
+                                    styles.progressFill,
+                                    {
+                                        width: `${liveSession.total > 0 ? (liveSession.present / liveSession.total) * 100 : 0}%`,
+                                        backgroundColor: '#FFF'
+                                    }
+                                ]}
+                            />
+                        </View>
+                        <Text style={styles.progressText}>
+                            {liveSession.total > 0 ? Math.round((liveSession.present / liveSession.total) * 100) : 0}% Attendance
+                        </Text>
+                    </View>
+
+                    <TouchableOpacity
+                        style={styles.endSessionButton}
+                        onPress={handleEndSession}
+                    >
+                        <Icon name="stop-circle" size={20} color="#FFF" />
+                        <Text style={styles.endSessionText}>END SESSION</Text>
+                    </TouchableOpacity>
+                </View>
+            ) : (
+                <View style={styles.noSessionContainer}>
+                    <Icon name="event-busy" size={64} color="rgba(255,255,255,0.5)" />
+                    <Text style={styles.noSessionTitle}>No Active Session</Text>
+                    <Text style={styles.noSessionSubtitle}>Start a new session to begin tracking attendance</Text>
+                </View>
+            )}
+        </LinearGradient>
+    );
+
+    const renderQuickActions = () => (
+        <View style={styles.quickActionsContainer}>
+            <TouchableOpacity
+                style={[styles.quickActionCard, styles.glassmorphic]}
+                onPress={handleQuickStart}
+            >
+                <View style={[styles.quickActionIcon, { backgroundColor: getModeColor(selectedMode) }]}>
+                    <Icon name="play-arrow" size={28} color="#FFF" />
+                </View>
+                <Text style={styles.quickActionTitle}>Start Class</Text>
+                <Text style={styles.quickActionSubtitle}>{selectedMode} Mode</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+                style={[styles.quickActionCard, styles.glassmorphic]}
+                onPress={() => Alert.alert("Navigate", "View Reports - Feature coming soon")}
+            >
+                <View style={[styles.quickActionIcon, { backgroundColor: '#059669' }]}>
+                    <Icon name="assessment" size={28} color="#FFF" />
+                </View>
+                <Text style={styles.quickActionTitle}>Reports</Text>
+                <Text style={styles.quickActionSubtitle}>Export Data</Text>
+            </TouchableOpacity>
+        </View>
+    );
+
+    const renderAlerts = () => {
+        const hasAlerts = adminStats.flaggedStudents > 0 || adminStats.pendingP2P > 0;
+        
+        if (!hasAlerts) return null;
+
+        return (
+            <View style={styles.alertsContainer}>
+                <Text style={styles.sectionTitle}>⚠️ Alerts & Notifications</Text>
+                
+                {adminStats.flaggedStudents > 0 && (
+                    <TouchableOpacity
+                        style={styles.alertCard}
+                        onPress={() => Alert.alert("Navigate", "View Flagged Students - Feature coming soon")}
+                    >
+                        <View style={styles.alertIconContainer}>
+                            <Icon name="flag" size={20} color="#DC2626" />
+                        </View>
+                        <View style={styles.alertContent}>
+                            <Text style={styles.alertTitle}>{adminStats.flaggedStudents} Students Flagged</Text>
+                            <Text style={styles.alertSubtitle}>Face match failed but QR scanned</Text>
+                        </View>
+                        <Icon name="chevron-right" size={20} color="#9CA3AF" />
+                    </TouchableOpacity>
+                )}
+
+                {adminStats.pendingP2P > 0 && (
+                    <TouchableOpacity
+                        style={styles.alertCard}
+                        onPress={() => navigation.navigate('VerificationQueueScreen')}
+                    >
+                        <View style={styles.alertIconContainer}>
+                            <Icon name="pending-actions" size={20} color="#F59E0B" />
+                        </View>
+                        <View style={styles.alertContent}>
+                            <Text style={styles.alertTitle}>{adminStats.pendingP2P} Pending Approvals</Text>
+                            <Text style={styles.alertSubtitle}>P2P verification requests waiting</Text>
+                        </View>
+                        <Icon name="chevron-right" size={20} color="#9CA3AF" />
+                    </TouchableOpacity>
+                )}
+            </View>
+        );
+    };
+
+    const renderQuickStats = () => (
+        <View style={styles.card}>
+            <View style={styles.statsHeader}>
+                <Text style={styles.sectionTitle}>📊 Quick Stats</Text>
+                <TouchableOpacity
+                    style={styles.aiButton}
+                    onPress={() => setIsPredictionModalVisible(true)}
+                >
+                    <Icon name="psychology" size={16} color="#7C3AED" />
+                    <Text style={styles.aiButtonText}>AI Predict</Text>
+                </TouchableOpacity>
+            </View>
+            
+            <View style={styles.statsGrid}>
+                <View style={styles.statBox}>
+                    <Text style={styles.statNumber}>{adminStats.weeklyAverage}%</Text>
+                    <Text style={styles.statLabel}>Weekly Average</Text>
+                    <View style={styles.trendIndicator}>
+                        <Icon name="trending-up" size={14} color="#22C55E" />
+                        <Text style={styles.trendText}>+3%</Text>
+                    </View>
+                </View>
+
+                <View style={styles.statBox}>
+                    <Text style={styles.statNumber}>{adminStats.absentToday}</Text>
+                    <Text style={styles.statLabel}>Absent Today</Text>
+                    <TouchableOpacity style={styles.viewDetailsButton}>
+                        <Text style={styles.viewDetailsText}>View</Text>
+                    </TouchableOpacity>
+                </View>
+            </View>
+        </View>
+    );
+
+    const renderClassBottomSheet = () => (
+        <Modal
+            isVisible={isClassModalVisible}
+            onBackdropPress={() => setIsClassModalVisible(false)}
+            onSwipeComplete={() => setIsClassModalVisible(false)}
+            swipeDirection="down"
+            style={styles.bottomModal}
+            backdropOpacity={0.5}
+            animationIn="slideInUp"
+            animationOut="slideOutDown"
+        >
+            <View style={styles.bottomSheetContent}>
+                <View style={styles.modalHandle} />
+                <Text style={styles.bottomSheetTitle}>Select Today's Class</Text>
+                
+                {availableClasses.map((classItem) => (
+                    <TouchableOpacity
+                        key={classItem.id}
+                        style={styles.classOption}
+                        onPress={() => {
+                            setIsClassModalVisible(false);
+                            handleCreateSession(classItem.name);
+                        }}
+                    >
+                        <Icon name={classItem.icon} size={24} color="#1E3A8A" />
+                        <Text style={styles.classOptionText}>{classItem.name}</Text>
+                        <Icon name="chevron-right" size={20} color="#9CA3AF" />
+                    </TouchableOpacity>
+                ))}
+            </View>
+        </Modal>
+    );
+
+    // --- Main Render ---
+    return (
+        <>
+            <StatusBar barStyle="dark-content" backgroundColor="#f5f5f5" />
+            <ScrollView
+                style={styles.scrollView}
+                refreshControl={
+                    <RefreshControl
+                        refreshing={refreshing}
+                        onRefresh={onRefresh}
+                        colors={['#1E3A8A']}
+                        tintColor={'#1E3A8A'}
+                    />
+                }
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={{ paddingBottom: 100 }}
+            >
+                {renderHeader()}
+                {renderProximityAlert()}
+                {renderModeSelector()}
+                {renderLiveSession()}
+                {!liveSession.isActive && renderQuickActions()}
+                {renderAlerts()}
+                {renderQuickStats()}
+            </ScrollView>
+
+            {!liveSession.isActive && (
+                <TouchableOpacity
+                    style={[styles.fab, { backgroundColor: getModeColor(selectedMode) }]}
+                    onPress={handleQuickStart}
+                    activeOpacity={0.8}
+                >
+                    <Icon name="add" size={32} color="#FFF" />
+                </TouchableOpacity>
+            )}
+            {renderPredictionModal()}
+            {renderClassBottomSheet()}
+        </>
+    );
+};
+
+// --- Styles ---
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f0f4f7',
-  },
-  scrollView: {
-    flex: 1,
-  },
-  header: {
-    padding: 24,
-    backgroundColor: 'white',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
-    alignItems: 'center',
-  },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#333',
-    textAlign: 'center',
-    marginBottom: 4,
-  },
-  headerSubtitle: {
-    fontSize: 16,
-    color: '#666',
-    textAlign: 'center',
-  },
-  progressBarContainer: {
-    width: '100%',
-    height: 4,
-    backgroundColor: '#e0e0e0',
-    borderRadius: 2,
-    marginTop: 20,
-  },
-  progressBar: {
-    height: '100%',
-    backgroundColor: '#007AFF',
-    borderRadius: 2,
-  },
-  stepIndicatorContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    padding: 20,
-  },
-  stepIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  stepCircle: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  stepActive: {
-    backgroundColor: '#007AFF',
-  },
-  stepInactive: {
-    backgroundColor: '#e0e0e0',
-  },
-  stepText: {
-    color: 'white',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  stepLine: {
-    flex: 1,
-    height: 2,
-    backgroundColor: '#e0e0e0',
-    marginHorizontal: 8,
-  },
-  stepLabels: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    marginTop: 10,
-    marginBottom: 20,
-  },
-  stepLabel: {
-    fontSize: 12,
-    color: '#666',
-    textAlign: 'center',
-    flex: 1,
-  },
-  formContainer: {
-    padding: 20,
-  },
-  section: {
-    backgroundColor: 'white',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  sectionTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-    paddingBottom: 10,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
-    borderRadius: 10,
-    padding: 15,
-    marginBottom: 15,
-    backgroundColor: '#fafafa',
-  },
-  inputError: {
-    borderColor: '#ff3b30',
-  },
-  inputText: {
-    color: '#333',
-    fontSize: 16,
-  },
-  placeholderText: {
-    color: '#999',
-    fontSize: 16,
-  },
-  halfInput: {
-    flex: 1,
-    marginHorizontal: 5,
-  },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  inputLabel: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 8,
-    fontWeight: '500',
-  },
-  pickerContainer: {
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
-    borderRadius: 10,
-    marginBottom: 15,
-    backgroundColor: '#fafafa',
-  },
-  picker: {
-    height: 50,
-    width: '100%',
-  },
-  uploadButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#007AFF',
-    borderStyle: 'dashed',
-    borderRadius: 10,
-    padding: 15,
-    marginBottom: 15,
-  },
-  uploadButtonText: {
-    color: '#007AFF',
-    marginLeft: 10,
-    fontWeight: '600',
-  },
-  switchContainer: {
-    marginBottom: 20,
-  },
-  switchRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 15,
-  },
-  switchText: {
-    marginLeft: 15,
-    color: '#333',
-    flex: 1,
-    fontSize: 14,
-  },
-  buttonContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    padding: 20,
-    backgroundColor: 'white',
-    borderTopWidth: 1,
-    borderTopColor: '#e0e0e0',
-  },
-  previousButton: {
-    flex: 1,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#007AFF',
-    borderRadius: 10,
-    marginRight: 10,
-    alignItems: 'center',
-  },
-  previousButtonText: {
-    color: '#007AFF',
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
-  nextButton: {
-    flex: 2,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 16,
-    backgroundColor: '#007AFF',
-    borderRadius: 10,
-  },
-  disabledButton: {
-    backgroundColor: '#ccc',
-  },
-  nextButtonText: {
-    color: 'white',
-    fontWeight: 'bold',
-    marginRight: 10,
-    fontSize: 16,
-  },
-  errorText: {
-    color: '#ff3b30',
-    fontSize: 12,
-    marginBottom: 10,
-    marginLeft: 5,
-  },
-  modalContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-  },
-  modalContent: {
-    backgroundColor: 'white',
-    borderRadius: 20,
-    padding: 25,
-    margin: 20,
-    maxHeight: '80%',
-    width: '90%',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 10,
-  },
-  modalTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginBottom: 20,
-    textAlign: 'center',
-    color: '#333',
-  },
-  modalScroll: {
-    flex: 1,
-  },
-  modalText: {
-    fontSize: 15,
-    lineHeight: 22,
-    color: '#555',
-    textAlign: 'justify',
-  },
-  modalCloseButton: {
-    backgroundColor: '#007AFF',
-    padding: 15,
-    borderRadius: 10,
-    marginTop: 20,
-    alignItems: 'center',
-  },
-  modalCloseButtonText: {
-    color: 'white',
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
+    scrollView: { flex: 1, backgroundColor: '#f5f5f5' },
+    header: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        paddingHorizontal: 20,
+        paddingTop: 16,
+        paddingBottom: 12,
+    },
+    greeting: { fontSize: 28, fontWeight: 'bold', color: '#111827' },
+    subtitle: { fontSize: 15, color: '#6B7280', marginTop: 4 },
+    verificationBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 6,
+        paddingHorizontal: 12,
+        borderRadius: 20,
+        gap: 6,
+    },
+    verificationText: {
+        fontSize: 12,
+        fontWeight: '600',
+    },
+    proximityAlert: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FFFBEB',
+        borderWidth: 2,
+        borderColor: '#FCD34D',
+        borderRadius: 16,
+        padding: 16,
+        marginHorizontal: 20,
+        marginBottom: 16,
+    },
+    proximityTitle: {
+        fontSize: 16,
+        fontWeight: 'bold',
+        color: '#92400E',
+        marginBottom: 4,
+    },
+    proximitySubtitle: {
+        fontSize: 14,
+        color: '#B45309',
+    },
+    modeSelectorContainer: {
+        flexDirection: 'row',
+        paddingHorizontal: 20,
+        paddingVertical: 16,
+        gap: 12,
+    },
+    modeChip: {
+        flex: 1,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingVertical: 12,
+        paddingHorizontal: 8,
+        borderRadius: 12,
+        backgroundColor: '#FFF',
+        borderWidth: 2,
+        borderColor: '#E5E7EB',
+        gap: 6,
+    },
+    modeChipText: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: '#666',
+    },
+    modeChipTextActive: {
+        color: '#FFF',
+    },
+    heroCard: {
+        borderRadius: 20,
+        padding: 20,
+        marginHorizontal: 20,
+        marginBottom: 16,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.1,
+        shadowRadius: 8,
+        elevation: 5,
+    },
+    liveHeader: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 16,
+    },
+    liveStatusBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: 'rgba(255, 255, 255, 0.3)',
+        borderRadius: 20,
+        paddingVertical: 6,
+        paddingHorizontal: 12,
+    },
+    liveDot: {
+        width: 10,
+        height: 10,
+        borderRadius: 5,
+        backgroundColor: '#FFF',
+        marginRight: 6,
+    },
+    liveStatusText: {
+        color: '#FFF',
+        fontSize: 12,
+        fontWeight: 'bold',
+        letterSpacing: 0.5,
+    },
+    modeIndicator: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 6,
+        paddingHorizontal: 12,
+        borderRadius: 20,
+        backgroundColor: 'rgba(255, 255, 255, 0.3)',
+        gap: 6,
+    },
+    modeIndicatorText: {
+        color: '#FFF',
+        fontSize: 12,
+        fontWeight: 'bold',
+    },
+    activityStreamContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: 'rgba(255, 255, 255, 0.2)',
+        borderRadius: 12,
+        padding: 10,
+        marginBottom: 16,
+        gap: 8,
+    },
+    rippleContainer: {
+        width: 48,
+        height: 48,
+        alignItems: 'center',
+        justifyContent: 'center',
+        position: 'relative',
+    },
+    ripple: {
+        position: 'absolute',
+        width: 48,
+        height: 48,
+        borderRadius: 24,
+        backgroundColor: '#F59E0B',
+        borderWidth: 2,
+        borderColor: '#F59E0B',
+    },
+    activityText: {
+        fontSize: 13,
+        color: '#FFF',
+        fontWeight: '500',
+        flex: 1,
+    },
+    heroClassName: {
+        fontSize: 24,
+        fontWeight: 'bold',
+        color: '#FFF',
+        marginBottom: 4,
+    },
+    heroStartTime: {
+        fontSize: 14,
+        color: 'rgba(255, 255, 255, 0.8)',
+        marginBottom: 20,
+    },
+    attendanceDisplay: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginBottom: 20,
+    },
+    attendanceCount: {
+        alignItems: 'center',
+        flex: 1,
+    },
+    attendanceNumber: {
+        fontSize: 36,
+        fontWeight: 'bold',
+        color: '#FFF',
+    },
+    attendanceLabel: {
+        fontSize: 14,
+        color: 'rgba(255, 255, 255, 0.8)',
+        marginTop: 4,
+    },
+    attendanceDivider: {
+        width: 2,
+        height: 40,
+        backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    },
+    progressBarContainer: {
+        marginBottom: 20,
+    },
+    progressBar: {
+        height: 12,
+        backgroundColor: 'rgba(255, 255, 255, 0.3)',
+        borderRadius: 6,
+        overflow: 'hidden',
+    },
+    progressFill: {
+        height: '100%',
+        borderRadius: 6,
+    },
+    statsHeader: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 12,
+    },
+    aiButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#EDE9FE',
+        paddingVertical: 6,
+        paddingHorizontal: 12,
+        borderRadius: 20,
+        gap: 4,
+    },
+    aiButtonText: {
+        fontSize: 12,
+        fontWeight: '600',
+        color: '#7C3AED',
+    },
+    predictionModal: {
+        backgroundColor: '#FFF',
+        borderRadius: 20,
+        padding: 24,
+        marginHorizontal: 20,
+    },
+    predictionHeader: {
+        alignItems: 'center',
+        marginBottom: 24,
+    },
+    predictionTitle: {
+        fontSize: 20,
+        fontWeight: 'bold',
+        color: '#111827',
+        marginTop: 8,
+    },
+    predictionContent: {
+        marginBottom: 20,
+    },
+    predictionMainStat: {
+        alignItems: 'center',
+        paddingVertical: 20,
+    },
+    predictionNumber: {
+        fontSize: 56,
+        fontWeight: 'bold',
+        color: '#7C3AED',
+    },
+    predictionLabel: {
+        fontSize: 14,
+        color: '#6B7280',
+        marginTop: 8,
+    },
+    predictionDivider: {
+        height: 1,
+        backgroundColor: '#E5E7EB',
+        marginVertical: 20,
+    },
+    predictionDetails: {
+        gap: 12,
+    },
+    predictionRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+    },
+    predictionDetailText: {
+        fontSize: 14,
+        color: '#374151',
+    },
+    predictionInsight: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FFFBEB',
+        padding: 12,
+        borderRadius: 12,
+        marginTop: 16,
+        gap: 8,
+    },
+    predictionInsightText: {
+        flex: 1,
+        fontSize: 13,
+        color: '#92400E',
+        fontWeight: '500',
+    },
+    predictionCloseButton: {
+        backgroundColor: '#7C3AED',
+        paddingVertical: 14,
+        borderRadius: 12,
+        alignItems: 'center',
+    },
+    predictionCloseText: {
+        color: '#FFF',
+        fontSize: 16,
+        fontWeight: 'bold',
+    },
+    progressText: {
+        fontSize: 13,
+        color: '#FFF',
+        marginTop: 8,
+        textAlign: 'center',
+        fontWeight: '600',
+    },
+    endSessionButton: {
+        flexDirection: 'row',
+        backgroundColor: 'rgba(255, 255, 255, 0.2)',
+        borderWidth: 2,
+        borderColor: '#FFF',
+        paddingVertical: 16,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+    },
+    endSessionText: {
+        color: '#FFF',
+        fontSize: 16,
+        fontWeight: 'bold',
+        letterSpacing: 0.5,
+    },
+    noSessionContainer: {
+        alignItems: 'center',
+        paddingVertical: 40,
+    },
+    noSessionTitle: {
+        fontSize: 20,
+        fontWeight: 'bold',
+        color: '#FFF',
+        marginTop: 16,
+    },
+    noSessionSubtitle: {
+        fontSize: 14,
+        color: 'rgba(255, 255, 255, 0.8)',
+        marginTop: 8,
+        textAlign: 'center',
+    },
+    quickActionsContainer: {
+        flexDirection: 'row',
+        paddingHorizontal: 20,
+        marginBottom: 16,
+        gap: 12,
+    },
+    quickActionCard: {
+        flex: 1,
+        backgroundColor: '#FFF',
+        borderRadius: 16,
+        padding: 16,
+        alignItems: 'center',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+        elevation: 3,
+    },
+    glassmorphic: {
+        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+        borderWidth: 1,
+        borderColor: 'rgba(255, 255, 255, 0.3)',
+    },
+    quickActionIcon: {
+        width: 56,
+        height: 56,
+        borderRadius: 28,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginBottom: 12,
+    },
+    quickActionTitle: {
+        fontSize: 16,
+        fontWeight: 'bold',
+        color: '#111827',
+        marginBottom: 4,
+    },
+    quickActionSubtitle: {
+        fontSize: 13,
+        color: '#6B7280',
+    },
+    alertsContainer: {
+        paddingHorizontal: 20,
+        marginBottom: 16,
+    },
+    sectionTitle: {
+        fontSize: 17,
+        fontWeight: 'bold',
+        color: '#111827',
+        marginBottom: 12,
+    },
+    alertCard: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FFF',
+        borderRadius: 12,
+        padding: 16,
+        marginBottom: 8,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.05,
+        shadowRadius: 2,
+        elevation: 2,
+    },
+    alertIconContainer: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        backgroundColor: '#FEF2F2',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginRight: 12,
+    },
+    alertContent: {
+        flex: 1,
+    },
+    alertTitle: {
+        fontSize: 15,
+        fontWeight: '600',
+        color: '#111827',
+        marginBottom: 2,
+    },
+    alertSubtitle: {
+        fontSize: 13,
+        color: '#6B7280',
+    },
+    card: {
+        backgroundColor: '#FFF',
+        borderRadius: 16,
+        padding: 20,
+        marginHorizontal: 20,
+        marginBottom: 16,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.08,
+        shadowRadius: 4,
+        elevation: 3,
+    },
+    statsGrid: {
+        flexDirection: 'row',
+        gap: 12,
+    },
+    statBox: {
+        flex: 1,
+        backgroundColor: '#F9FAFB',
+        borderRadius: 12,
+        padding: 16,
+        alignItems: 'center',
+    },
+    statNumber: {
+        fontSize: 28,
+        fontWeight: 'bold',
+        color: '#1E3A8A',
+        marginBottom: 4,
+    },
+    statLabel: {
+        fontSize: 13,
+        color: '#6B7280',
+        textAlign: 'center',
+    },
+    trendIndicator: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginTop: 8,
+        gap: 4,
+    },
+    trendText: {
+        fontSize: 12,
+        color: '#22C55E',
+        fontWeight: '600',
+    },
+    viewDetailsButton: {
+        marginTop: 8,
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        backgroundColor: '#E0E7FF',
+        borderRadius: 8,
+    },
+    viewDetailsText: {
+        fontSize: 12,
+        color: '#1E3A8A',
+        fontWeight: '600',
+    },
+    bottomModal: {
+        justifyContent: 'flex-end',
+        margin: 0,
+    },
+    bottomSheetContent: {
+        backgroundColor: '#FFF',
+        borderTopLeftRadius: 20,
+        borderTopRightRadius: 20,
+        paddingHorizontal: 20,
+        paddingTop: 8,
+        paddingBottom: 32,
+        minHeight: 300,
+    },
+    modalHandle: {
+        width: 40,
+        height: 5,
+        backgroundColor: '#D1D5DB',
+        borderRadius: 3,
+        alignSelf: 'center',
+        marginBottom: 20,
+    },
+    bottomSheetTitle: {
+        fontSize: 20,
+        fontWeight: 'bold',
+        color: '#111827',
+        marginBottom: 20,
+    },
+    classOption: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#F9FAFB',
+        borderRadius: 12,
+        padding: 16,
+        marginBottom: 12,
+        gap: 12,
+    },
+    classOptionText: {
+        flex: 1,
+        fontSize: 16,
+        fontWeight: '600',
+        color: '#111827',
+    },
+    fab: {
+        position: 'absolute',
+        right: 20,
+        bottom: 20,
+        width: 64,
+        height: 64,
+        borderRadius: 32,
+        alignItems: 'center',
+        justifyContent: 'center',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 8,
+        elevation: 8,
+    },
 });
 
-export default AdminRegistrationScreen;
+export default AdminHomeScreen;

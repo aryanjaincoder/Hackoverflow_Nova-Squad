@@ -27,13 +27,14 @@ type MenuItem = {
 type HamburgerMenuProps = {
   isVisible: boolean;
   onClose: () => void;
+  navigation?: any;  // <-- ADD THIS
   currentTheme?: 'light' | 'dark';
   onThemeToggle?: () => void;
   onLogout?: () => void;
   syncStatus?: 'online' | 'offline';
   userName?: string;
   userEmail?: string;
-  role?: 'student' | 'admin'; // <-- YAHAN 'role' PROP ADD KIYA
+  role?: 'student' | 'admin';
 };
 // --- FIX END ---
 
@@ -43,6 +44,7 @@ type HamburgerMenuProps = {
 const studentMenuItems: MenuItem[] = [
   { id: '1', title: 'Dashboard', icon: 'dashboard', type: 'primary' },
   { id: '2', title: 'Mark Attendance', icon: 'check-circle', type: 'primary' },
+  { id: '2.5', title: 'Enroll Face', icon: 'face-recognition', type: 'primary' },
   { id: '3', title: 'My Analytics', icon: 'analytics', type: 'primary' },
   { id: '4', title: 'Challenges', icon: 'flag', type: 'primary' },
   { id: '5', title: 'Attendance Calculator', icon: 'calculate', type: 'primary' },
@@ -73,13 +75,14 @@ const adminMenuItems: MenuItem[] = [
 const HamburgerMenu: React.FC<HamburgerMenuProps> = ({
   isVisible,
   onClose,
+  navigation,  // <-- ADD THIS
   currentTheme = 'light',
   onThemeToggle,
   onLogout,
   syncStatus = 'online',
   userName = 'Student',
   userEmail = 'student@college.edu',
-  role = 'student', // <-- 'role' ko yahan receive kiya
+  role = 'student',
 }) => {
   const slideAnim = React.useRef(new Animated.Value(-width)).current;
   const overlayAnim = React.useRef(new Animated.Value(0)).current;
@@ -114,25 +117,29 @@ const HamburgerMenu: React.FC<HamburgerMenuProps> = ({
   ];
 
   // Role ke basis par menuItems ko combine kiya
-  const menuItems = [
-    ...(role === 'admin' ? adminMenuItems : studentMenuItems),
-    ...commonSettingsItems,
-    ...commonAccountItems,
-  ].map((item, index, arr) => ({
-      ...item,
-      // onPress ko update kiya taaki menu close ho
-      onPress: () => {
-          if (item.onPress) {
-            item.onPress(); // Original function (like onLogout, onThemeToggle)
-          }
-          // Agar 'Logout' ya 'Theme' nahi hai, tabhi menu close karo
-          // (Kyunki onLogout aur onThemeToggle unka apna logic handle karte hain)
-          if (item.id !== '19' && item.id !== '12') {
-            onClose();
-          }
-          console.log(item.title);
-      }
-  }));
+ const menuItems = [
+  ...(role === 'admin' ? adminMenuItems : studentMenuItems),
+  ...commonSettingsItems,
+  ...commonAccountItems,
+].map((item, index, arr) => ({
+    ...item,
+    onPress: () => {
+        // Handle navigation items
+        if (item.title === 'Enroll Face' && navigation) {
+          navigation.navigate('EnrollFaceScreen');
+          onClose();
+          return;
+        }
+        
+        if (item.onPress) {
+          item.onPress();
+        }
+        if (item.id !== '19' && item.id !== '12') {
+          onClose();
+        }
+        console.log(item.title);
+    }
+}));
   // --- FIX END ---
 
 

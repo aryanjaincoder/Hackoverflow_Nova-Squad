@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
     View, Text, ScrollView, TouchableOpacity, RefreshControl,
     StyleSheet, StatusBar, Alert, Platform, PermissionsAndroid,
-    InteractionManager
+    InteractionManager, Linking
 } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RootStackParamList, UserData } from '../../navigation/AppNavigator';
@@ -10,6 +10,7 @@ import Icon from 'react-native-vector-icons/MaterialIcons';
 import messaging from '@react-native-firebase/messaging';
 import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
+import BLEService from '../../services/BLEService';
 
 // --- Interfaces ---
 interface AttendanceStats {
@@ -88,6 +89,12 @@ const StudentHomeScreen: React.FC<StudentHomeScreenProps> = ({ navigation, userD
         { id: '2', message: 'Reminder: Math class in 30 minutes', timestamp: '11:00 AM' },
     ]);
     const [isNotificationSetupDone, setIsNotificationSetupDone] = useState(false);
+    
+    // --- BLE States ---
+    const [isBLEActive, setIsBLEActive] = useState(false);
+    const [bleStatus, setBLEStatus] = useState<'broadcasting' | 'stopped' | 'error'>('stopped');
+    const [broadcastStartTime, setBroadcastStartTime] = useState<Date | null>(null);
+    const [isBLELoading, setIsBLELoading] = useState(false);
 
     // --- Notification Setup ---
     const setupNotifications = useCallback(async () => {
@@ -183,10 +190,232 @@ const StudentHomeScreen: React.FC<StudentHomeScreenProps> = ({ navigation, userD
         return () => clearInterval(interval);
     }, []);
 
+    // 🔥 CLEANUP: Stop BLE when component unmounts
+    useEffect(() => {
+        return () => {
+            if (isBLEActive) {
+                console.log('[StudentHome] 🛑 Component unmounting - Stopping broadcast');
+                BLEService.stopAdvertising();
+            }
+        };
+    }, [isBLEActive]);
+
+    // --- BLE Helper Functions ---
+    const getBLEStatusColor = () => {
+        switch (bleStatus) {
+            case 'broadcasting': return '#22C55E';
+            case 'stopped': return '#9CA3AF';
+            case 'error': return '#EF4444';
+        }
+    };
+
+    const getBLEStatusText = () => {
+        switch (bleStatus) {
+            case 'broadcasting': return 'Broadcasting';
+            case 'stopped': return 'Inactive';
+            case 'error': return 'Error';
+        }
+    };
+
+    const getBroadcastDuration = () => {
+        if (!broadcastStartTime) return '0m';
+        const now = new Date().getTime();
+        const start = broadcastStartTime.getTime();
+        const minutes = Math.floor((now - start) / 60000);
+        return `${minutes}m`;
+    };
+
+    // 🚀 REQUEST ALL BLE PERMISSIONS
+    const requestBLEPermissions = async (): Promise<boolean> => {
+        try {
+            if (Platform.OS !== 'android') {
+                return true; // iOS handles permissions differently
+            }
+
+            const permissions: string[] = [];
+
+            // Android 12+ (API 31+)
+            if (Platform.Version >= 31) {
+                permissions.push(
+                    PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+                    PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
+                    PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT
+                );
+            }
+
+            // All Android versions
+            permissions.push(
+                PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+            );
+
+            console.log('[BLE] Requesting permissions:', permissions);
+
+            const results = await PermissionsAndroid.requestMultiple(permissions as any[]);
+            
+            console.log('[BLE] Permission results:', results);
+
+            // Check if all permissions granted
+            const allGranted = Object.values(results).every(
+                result => result === PermissionsAndroid.RESULTS.GRANTED
+            );
+
+            if (!allGranted) {
+                console.warn('[BLE] Some permissions denied:', results);
+                
+                // Show settings alert
+                Alert.alert(
+                    'Permissions Required',
+                    'Bluetooth and Location permissions are required for proximity detection.\n\nPlease enable them in Settings.',
+                    [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                            text: 'Open Settings',
+                            onPress: () => Linking.openSettings()
+                        }
+                    ]
+                );
+                
+                return false;
+            }
+
+            return true;
+        } catch (error) {
+            console.error('[BLE] Permission request error:', error);
+            Alert.alert('Error', 'Failed to request permissions');
+            return false;
+        }
+    };
+
+    // 🔵 START BLE BROADCASTING
+    const handleStartBLE = async () => {
+        try {
+            setIsBLELoading(true);
+
+            const userId = auth().currentUser?.uid;
+            if (!userId) {
+                Alert.alert('Error', 'Please log in first');
+                setIsBLELoading(false);
+                return;
+            }
+
+            console.log('[StudentHome] ========================================');
+            console.log('[StudentHome] 🔵 Starting BLE Broadcasting');
+            console.log('[StudentHome] ========================================');
+
+            // 1️⃣ Request ALL BLE Permissions
+            console.log('[StudentHome] 1️⃣ Requesting BLE permissions...');
+            const hasPermissions = await requestBLEPermissions();
+            
+            if (!hasPermissions) {
+                setBLEStatus('error');
+                setIsBLELoading(false);
+                return;
+            }
+
+            console.log('[StudentHome] ✅ All permissions granted');
+
+            // 2️⃣ Get user's class from Firestore
+            console.log('[StudentHome] 2️⃣ Fetching user class...');
+            const userDoc = await firestore()
+                .collection('users')
+                .doc(userId)
+                .get();
+            
+            const userClass = userDoc.data()?.class || 'Unknown';
+            
+            console.log('[StudentHome] 👤 User ID:', userId);
+            console.log('[StudentHome] 👤 User Name:', userData.name);
+            console.log('[StudentHome] 📚 User Class:', userClass);
+            console.log('[StudentHome] 🎯 Will broadcast as: ATT_' + userId + '_' + userClass);
+            
+            // 3️⃣ Start BLE advertising
+            console.log('[StudentHome] 3️⃣ Starting BLE advertising...');
+            const success = await BLEService.startAdvertising(userId, userClass);
+            
+            if (success) {
+                setIsBLEActive(true);
+                setBLEStatus('broadcasting');
+                setBroadcastStartTime(new Date());
+                console.log('[StudentHome] ✅ BLE broadcasting started successfully');
+                console.log('[StudentHome] ========================================');
+                
+                Alert.alert(
+                    '✅ BLE Active',
+                    'Proximity detection is now active.\nTeachers can detect your presence.',
+                    [{ text: 'OK' }]
+                );
+            } else {
+                setBLEStatus('error');
+                console.log('[StudentHome] ❌ BLE broadcasting failed');
+                console.log('[StudentHome] ========================================');
+                
+                Alert.alert(
+                    'Error',
+                    'Failed to start BLE broadcasting.\nPlease check Bluetooth and Location are enabled.',
+                    [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                            text: 'Open Settings',
+                            onPress: () => Linking.openSettings()
+                        }
+                    ]
+                );
+            }
+        } catch (error) {
+            console.error('[StudentHome] ========================================');
+            console.error('[StudentHome] ❌ Error starting BLE:', error);
+            console.error('[StudentHome] ========================================');
+            setBLEStatus('error');
+            
+            Alert.alert(
+                'Error',
+                `Failed to start BLE: ${error instanceof Error ? error.message : 'Unknown error'}`
+            );
+        } finally {
+            setIsBLELoading(false);
+        }
+    };
+
+    // 🔴 STOP BLE BROADCASTING
+    const handleStopBLE = async () => {
+        try {
+            setIsBLELoading(true);
+            
+            console.log('[StudentHome] ========================================');
+            console.log('[StudentHome] 🔴 Stopping BLE Broadcasting');
+            console.log('[StudentHome] ========================================');
+            
+            await BLEService.stopAdvertising();
+            
+            setIsBLEActive(false);
+            setBLEStatus('stopped');
+            setBroadcastStartTime(null);
+            
+            console.log('[StudentHome] ✅ BLE broadcasting stopped');
+            console.log('[StudentHome] ========================================');
+            
+            Alert.alert('✅ BLE Stopped', 'Proximity detection has been disabled.');
+        } catch (error) {
+            console.error('[StudentHome] ❌ Error stopping BLE:', error);
+            Alert.alert('Error', 'Failed to stop BLE broadcasting');
+        } finally {
+            setIsBLELoading(false);
+        }
+    };
+
+    // 🎛️ TOGGLE BLE
+    const handleToggleBLE = () => {
+        if (isBLEActive) {
+            handleStopBLE();
+        } else {
+            handleStartBLE();
+        }
+    };
+
     // --- Handlers ---
     const onRefresh = useCallback(async () => {
         setRefreshing(true);
-        console.log('Refreshing student data...');
+        console.log('[StudentHome] Refreshing student data...');
 
         await new Promise<void>(resolve => setTimeout(() => {
             setAttendanceStats(prev => ({
@@ -197,7 +426,7 @@ const StudentHomeScreen: React.FC<StudentHomeScreenProps> = ({ navigation, userD
         }, 1500));
 
         setRefreshing(false);
-        console.log("Refresh complete.");
+        console.log("[StudentHome] Refresh complete.");
     }, []);
 
     const handleScanAttendancePress = useCallback(() => {
@@ -205,12 +434,98 @@ const StudentHomeScreen: React.FC<StudentHomeScreenProps> = ({ navigation, userD
         navigation.navigate('BLECheckScreen', { sessionId: currentSessionId });
     }, [navigation]);
 
-    // 🆕 Setup Screen Handler
     const handleSetupPress = useCallback(() => {
         navigation.navigate('SetupScreen');
     }, [navigation]);
 
     // --- Render Functions ---
+    const renderBLEStatus = () => (
+        <View style={[styles.card, styles.bleCard]}>
+            <View style={styles.bleHeader}>
+                <View style={styles.bleIconContainer}>
+                    <Icon 
+                        name="bluetooth" 
+                        size={32} 
+                        color={getBLEStatusColor()} 
+                    />
+                    {bleStatus === 'broadcasting' && (
+                        <View style={[styles.blePulse, { backgroundColor: getBLEStatusColor() }]} />
+                    )}
+                </View>
+                <View style={styles.bleInfo}>
+                    <Text style={styles.bleTitle}>Proximity Detection</Text>
+                    <Text style={[styles.bleStatus, { color: getBLEStatusColor() }]}>
+                        {getBLEStatusText()}
+                    </Text>
+                </View>
+            </View>
+
+            {bleStatus === 'broadcasting' && (
+                <View style={styles.bleDetails}>
+                    <View style={styles.bleDetailRow}>
+                        <Icon name="access-time" size={16} color="#6B7280" />
+                        <Text style={styles.bleDetailText}>
+                            Broadcasting for {getBroadcastDuration()}
+                        </Text>
+                    </View>
+                    <View style={styles.bleDetailRow}>
+                        <Icon name="wifi-tethering" size={16} color="#6B7280" />
+                        <Text style={styles.bleDetailText}>
+                            Teachers can detect your presence
+                        </Text>
+                    </View>
+                </View>
+            )}
+
+            {bleStatus === 'error' && (
+                <View style={styles.bleError}>
+                    <Icon name="error-outline" size={20} color="#EF4444" />
+                    <Text style={styles.bleErrorText}>
+                        Bluetooth & Location permissions required for proximity detection
+                    </Text>
+                </View>
+            )}
+
+            {bleStatus === 'stopped' && (
+                <View style={styles.bleInfo}>
+                    <Text style={styles.bleStoppedText}>
+                        Enable proximity detection to receive nearby class notifications
+                    </Text>
+                </View>
+            )}
+
+            {/* 🔥 TOGGLE BUTTON */}
+            <TouchableOpacity
+                style={[
+                    styles.bleToggleButton,
+                    isBLEActive ? styles.bleToggleButtonActive : styles.bleToggleButtonInactive
+                ]}
+                onPress={handleToggleBLE}
+                disabled={isBLELoading}
+            >
+                {isBLELoading ? (
+                    <>
+                        <Icon name="hourglass-empty" size={20} color="#FFF" />
+                        <Text style={styles.bleToggleButtonText}>
+                            {isBLEActive ? 'Stopping...' : 'Starting...'}
+                        </Text>
+                    </>
+                ) : (
+                    <>
+                        <Icon 
+                            name={isBLEActive ? 'bluetooth-disabled' : 'bluetooth'} 
+                            size={20} 
+                            color="#FFF" 
+                        />
+                        <Text style={styles.bleToggleButtonText}>
+                            {isBLEActive ? 'Stop Broadcasting' : 'Start Broadcasting'}
+                        </Text>
+                    </>
+                )}
+            </TouchableOpacity>
+        </View>
+    );
+
     const renderHeroSection = () => (
         <View style={[styles.card, styles.heroCard]}>
             <Text style={styles.heroTitle}>🎯 Today's Attendance</Text>
@@ -227,10 +542,7 @@ const StudentHomeScreen: React.FC<StudentHomeScreenProps> = ({ navigation, userD
         </View>
     );
 
-    // 🆕 Setup Button Section (Only for Admins or Testing)
     const renderSetupButton = () => {
-        // Show only for admins or during testing
-        // Remove this check to show for everyone during setup
         if (userData.role !== 'student') return null;
 
         return (
@@ -420,8 +732,11 @@ const StudentHomeScreen: React.FC<StudentHomeScreenProps> = ({ navigation, userD
                     <Text style={styles.subtitle}>Your attendance dashboard</Text>
                 </View>
 
-                {/* 🆕 Setup Button - Shows at top for easy access */}
+                {/* Setup Button */}
                 {renderSetupButton()}
+
+                {/* 🔥 BLE Status Card with Toggle Button */}
+                {renderBLEStatus()}
 
                 {/* Content */}
                 {renderHeroSection()}
@@ -555,7 +870,6 @@ const styles = StyleSheet.create({
         marginBottom: 8,
         overflow: 'hidden'
     },
-    // 🆕 Setup Card Styles
     setupCard: {
         backgroundColor: '#e3f2fd',
         borderLeftWidth: 4,
@@ -598,6 +912,104 @@ const styles = StyleSheet.create({
         color: '#e67e22',
         fontStyle: 'italic',
         textAlign: 'center',
+    },
+    bleCard: {
+        backgroundColor: '#F9FAFB',
+        borderWidth: 1,
+        borderColor: '#E5E7EB',
+    },
+    bleHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginBottom: 12,
+    },
+    bleIconContainer: {
+        position: 'relative',
+        width: 56,
+        height: 56,
+        borderRadius: 28,
+        backgroundColor: '#FFF',
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginRight: 12,
+        borderWidth: 2,
+        borderColor: '#E5E7EB',
+    },
+    blePulse: {
+        position: 'absolute',
+        width: 56,
+        height: 56,
+        borderRadius: 28,
+        opacity: 0.3,
+    },
+    bleInfo: {
+        flex: 1,
+    },
+    bleTitle: {
+        fontSize: 16,
+        fontWeight: '600',
+        color: '#111827',
+        marginBottom: 4,
+    },
+    bleStatus: {
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    bleDetails: {
+        backgroundColor: '#FFF',
+        borderRadius: 8,
+        padding: 12,
+        gap: 8,
+        marginBottom: 12,
+    },
+    bleDetailRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    bleDetailText: {
+        fontSize: 13,
+        color: '#6B7280',
+    },
+    bleError: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FEF2F2',
+        padding: 12,
+        borderRadius: 8,
+        gap: 8,
+        marginBottom: 12,
+    },
+    bleErrorText: {
+        flex: 1,
+        fontSize: 13,
+        color: '#DC2626',
+    },
+    bleStoppedText: {
+        fontSize: 13,
+        color: '#6B7280',
+        fontStyle: 'italic',
+        marginBottom: 12,
+    },
+    // 🔥 NEW: Toggle Button Styles
+    bleToggleButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingVertical: 14,
+        borderRadius: 8,
+        gap: 8,
+    },
+    bleToggleButtonActive: {
+        backgroundColor: '#EF4444', // Red for Stop
+    },
+    bleToggleButtonInactive: {
+        backgroundColor: '#22C55E', // Green for Start
+    },
+    bleToggleButtonText: {
+        color: '#FFF',
+        fontSize: 16,
+        fontWeight: '600',
     },
 });
 

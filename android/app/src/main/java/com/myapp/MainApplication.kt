@@ -17,8 +17,9 @@ class MainApplication : Application(), ReactApplication {
       object : DefaultReactNativeHost(this) {
         override fun getPackages(): List<ReactPackage> =
             PackageList(this).packages.apply {
-              // 👇 ADD YOUR CUSTOM PACKAGE HERE
+              // 👇 ADD YOUR CUSTOM PACKAGES HERE
               add(FrequencyDetectorPackage())
+              add(BLEAdvertiserPackage())  // ✅ BLE Advertising Module
             }
 
         override fun getJSMainModuleName(): String = "index"

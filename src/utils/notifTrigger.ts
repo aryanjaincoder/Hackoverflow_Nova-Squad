@@ -1,4 +1,4 @@
-// src/utils/notifTrigger.ts - FINAL FIXED VERSION
+// src/utils/notifTrigger.ts - WITH BLE TARGETING SUPPORT
 
 import firestore, { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 import notifee, { AndroidImportance } from '@notifee/react-native';
@@ -22,24 +22,19 @@ export const initializeStudentClass = async () => {
     if (userDoc.exists()) {
       const userData = userDoc.data();
       
-      // ✅ FIX: Default to 'student' if role doesn't exist
       USER_ROLE = userData?.role || 'student';
       STUDENT_CLASS = userData?.class || null;
       
       console.log('[notifTrigger] User role:', USER_ROLE);
       console.log('[notifTrigger] Student class:', STUDENT_CLASS);
       
-      // ✅ Admin doesn't need class field
       if (USER_ROLE === 'admin') {
         console.log('[notifTrigger] Admin user - skipping class requirement');
         return;
       }
       
-      // ✅ FIX: Only warn if student has no class (don't show Alert - just log)
       if (USER_ROLE === 'student' && !STUDENT_CLASS) {
         console.warn('[notifTrigger] ⚠️ Student has no class field! Will not receive targeted notifications.');
-        // ❌ REMOVED ALERT - It's annoying and blocks the app flow
-        // Don't throw - let app continue
       }
     }
   } catch (error) {
@@ -248,10 +243,9 @@ export const startSessionListener = async () => {
   }
 
   // ✅ CRITICAL FIX: Only listen to 'active' status
-  // Removed 'ended' from query - we'll detect it through modifications
   let query = firestore()
     .collection('attendance_sessions')
-    .where('status', '==', 'active'); // ✅ ONLY ACTIVE
+    .where('status', '==', 'active');
 
   // ✅ Only filter by class if STUDENT_CLASS exists
   if (STUDENT_CLASS) {
@@ -283,6 +277,8 @@ export const startSessionListener = async () => {
           class: sessionData.class,
           subject: sessionData.subject,
           mode: sessionData.mode,
+          isTargeted: sessionData.isTargeted,
+          targetStudentsCount: sessionData.targetStudents?.length || 0,
           fromCache: change.doc.metadata.fromCache,
           hasPendingWrites: change.doc.metadata.hasPendingWrites
         });
@@ -292,6 +288,28 @@ export const startSessionListener = async () => {
           console.log('⚠️ [notifTrigger] Ignoring cached/pending data');
           return;
         }
+
+        // ✅✅✅ NEW: CHECK IF THIS IS A TARGETED SESSION (BLE) ✅✅✅
+        const userId = auth().currentUser?.uid;
+        const isTargeted = sessionData.isTargeted || false;
+        const targetStudents = sessionData.targetStudents || [];
+
+        if (isTargeted && userId) {
+          // Check if current user is in target list
+          if (!targetStudents.includes(userId)) {
+            console.log(`🚫 [notifTrigger] Skipping notification - User ${userId.substring(0, 12)}... not in target list`);
+            console.log(`📋 [notifTrigger] Target list:`, targetStudents.map((id: string) => id.substring(0, 12) + '...'));
+            return; // Don't show notification to this student
+          } else {
+            console.log(`✅ [notifTrigger] User ${userId.substring(0, 12)}... IS in target list - showing notification`);
+          }
+        } else if (isTargeted && !userId) {
+          console.warn(`⚠️ [notifTrigger] Targeted session but no userId - skipping`);
+          return;
+        } else {
+          console.log(`📢 [notifTrigger] Normal session (not targeted) - showing to all students in class`);
+        }
+        // ✅✅✅ END OF TARGETING CHECK ✅✅✅
 
         const previousData =
           change.type === 'modified' && change.oldIndex !== -1

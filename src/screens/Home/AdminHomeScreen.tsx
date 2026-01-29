@@ -14,6 +14,10 @@ import LinearGradient from 'react-native-linear-gradient';
 import TextTicker from 'react-native-text-ticker';
 import Modal from 'react-native-modal';
 
+// ✅ IMPORT BLE SERVICE AND MODAL
+import BLEService, { DetectedStudent } from '../../services/BLEService';
+import NearbyStudentsModal from '../../components/NearbyStudentsModal';
+
 // --- Interfaces ---
 interface LiveSession {
     isActive: boolean;
@@ -73,6 +77,11 @@ const AdminHomeScreen: React.FC<AdminHomeScreenProps> = ({ navigation, userData 
     ]);
     const [modeTapCount, setModeTapCount] = useState(0);
     const [isClassModalVisible, setIsClassModalVisible] = useState(false);
+
+    // ✅ NEW BLE STATES
+    const [isBLEScanning, setIsBLEScanning] = useState(false);
+    const [nearbyStudents, setNearbyStudents] = useState<DetectedStudent[]>([]);
+    const [showNearbyModal, setShowNearbyModal] = useState(false);
 
     // Available classes
     const availableClasses = [
@@ -184,6 +193,62 @@ const AdminHomeScreen: React.FC<AdminHomeScreenProps> = ({ navigation, userData 
             case 'SOUND': return ['#7C3AED', '#EC4899'];
         }
     };
+
+    // ✅ NEW BLE HANDLERS
+    const handleStartBLEScan = async () => {
+        try {
+            console.log('[AdminHome] Starting BLE scan...');
+            setIsBLEScanning(true);
+            
+            await BLEService.startScanningForStudents((students) => {
+                console.log('[AdminHome] Detected students:', students.length);
+                setNearbyStudents(students);
+                
+                // Update proximity alert based on detected students
+                if (students.length > 10 && !liveSession.isActive) {
+                    const suggestedMode: 'QR' | 'NFC' | 'SOUND' = 
+                        students.length > 40 ? 'SOUND' : students.length > 20 ? 'NFC' : 'QR';
+                    
+                    setProximityAlert({
+                        studentsDetected: students.length,
+                        suggestedMode: suggestedMode
+                    });
+                }
+            });
+            
+            // Show modal after starting scan
+            setShowNearbyModal(true);
+        } catch (error) {
+            console.error('[AdminHome] BLE scan error:', error);
+            Alert.alert('BLE Error', 'Failed to start scanning for students.');
+        }
+    };
+
+    const handleStopBLEScan = () => {
+        console.log('[AdminHome] Stopping BLE scan...');
+        BLEService.stopScanning();
+        setIsBLEScanning(false);
+        setNearbyStudents([]);
+    };
+
+    const handleStartSessionWithStudents = (studentIds: string[]) => {
+        setShowNearbyModal(false);
+        
+        // Navigate to create session with detected students
+        navigation.navigate('CreateSessionScreen', {
+            mode: selectedMode,
+            targetStudents: studentIds
+        });
+    };
+
+    // ✅ CLEANUP BLE ON UNMOUNT
+    useEffect(() => {
+        return () => {
+            if (isBLEScanning) {
+                BLEService.stopScanning();
+            }
+        };
+    }, [isBLEScanning]);
 
     // --- Effects ---
     useEffect(() => {
@@ -338,47 +403,48 @@ const AdminHomeScreen: React.FC<AdminHomeScreenProps> = ({ navigation, userData 
             );
         }
     }, [modeTapCount]);
+
     useEffect(() => {
-    const userId = auth().currentUser?.uid;
-    if (!userId) return;
+        const userId = auth().currentUser?.uid;
+        if (!userId) return;
 
-    const unsubscribe = firestore()
-        .collection('attendance_sessions')
-        .where('adminId', '==', userId)
-        .where('status', '==', 'active')
-        .orderBy('createdAt', 'desc')
-        .limit(1)
-        .onSnapshot(
-            (snapshot) => {
-                if (!snapshot.empty) {
-                    const sessionDoc = snapshot.docs[0];
-                    const sessionData = sessionDoc.data();
-                    
-                    setLiveSession({
-                        isActive: true,
-                        sessionId: sessionDoc.id,
-                        className: sessionData.subject || sessionData.className,
-                        present: sessionData.presentCount || 0,
-                        total: sessionData.totalStudents || 0,
-                        startTime: sessionData.startTime,
-                        mode: sessionData.mode,
-                    });
-                } else {
-                    // No active session
-                    setLiveSession({
-                        isActive: false,
-                        present: 0,
-                        total: 0,
-                    });
+        const unsubscribe = firestore()
+            .collection('attendance_sessions')
+            .where('adminId', '==', userId)
+            .where('status', '==', 'active')
+            .orderBy('createdAt', 'desc')
+            .limit(1)
+            .onSnapshot(
+                (snapshot) => {
+                    if (!snapshot.empty) {
+                        const sessionDoc = snapshot.docs[0];
+                        const sessionData = sessionDoc.data();
+                        
+                        setLiveSession({
+                            isActive: true,
+                            sessionId: sessionDoc.id,
+                            className: sessionData.subject || sessionData.className,
+                            present: sessionData.presentCount || 0,
+                            total: sessionData.totalStudents || 0,
+                            startTime: sessionData.startTime,
+                            mode: sessionData.mode,
+                        });
+                    } else {
+                        setLiveSession({
+                            isActive: false,
+                            present: 0,
+                            total: 0,
+                        });
+                    }
+                },
+                (error) => {
+                    console.error('[AdminHome] Error listening to active sessions:', error);
                 }
-            },
-            (error) => {
-                console.error('[AdminHome] Error listening to active sessions:', error);
-            }
-        );
+            );
 
-    return () => unsubscribe();
-}, []);
+        return () => unsubscribe();
+    }, []);
+
     // --- Handlers ---
     const onRefresh = useCallback(async () => {
         setRefreshing(true);
@@ -402,47 +468,45 @@ const AdminHomeScreen: React.FC<AdminHomeScreenProps> = ({ navigation, userData 
     }, []);
 
     const handleEndSession = () => {
-    Alert.alert(
-        "End Session",
-        "Are you sure you want to end the current session?\n\nNote: Monitor live analytics on the website.",
-        [
-            { text: "Cancel", style: "cancel" },
-            {
-                text: "End",
-                style: "destructive",
-                onPress: async () => {
-                    try {
-                        // End session in Firebase
-                        if (liveSession.sessionId) {
-                            await firestore()
-                                .collection('attendance_sessions')
-                                .doc(liveSession.sessionId)
-                                .update({
-                                    status: 'ended',
-                                    endTime: new Date().toLocaleTimeString('en-US', {
-                                        hour: '2-digit',
-                                        minute: '2-digit',
-                                    }),
-                                });
+        Alert.alert(
+            "End Session",
+            "Are you sure you want to end the current session?\n\nNote: Monitor live analytics on the website.",
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "End",
+                    style: "destructive",
+                    onPress: async () => {
+                        try {
+                            if (liveSession.sessionId) {
+                                await firestore()
+                                    .collection('attendance_sessions')
+                                    .doc(liveSession.sessionId)
+                                    .update({
+                                        status: 'ended',
+                                        endTime: new Date().toLocaleTimeString('en-US', {
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                        }),
+                                    });
+                            }
+                            
+                            setLiveSession({ isActive: false, present: 0, total: 0 });
+                            
+                            Alert.alert(
+                                "Success", 
+                                "Session ended successfully.\n\nView detailed analytics on the website.",
+                                [{ text: "OK" }]
+                            );
+                        } catch (error) {
+                            console.error('[AdminHome] Error ending session:', error);
+                            Alert.alert('Error', 'Could not end session. Please try again.');
                         }
-                        
-                        // Reset local state
-                        setLiveSession({ isActive: false, present: 0, total: 0 });
-                        
-                        Alert.alert(
-                            "Success", 
-                            "Session ended successfully.\n\nView detailed analytics on the website.",
-                            [{ text: "OK" }]
-                        );
-                    } catch (error) {
-                        console.error('[AdminHome] Error ending session:', error);
-                        Alert.alert('Error', 'Could not end session. Please try again.');
                     }
                 }
-            }
-        ]
-    );
-};
+            ]
+        );
+    };
 
     const handleCreateSession = (className?: string) => {
         navigation.navigate('CreateSessionScreen', { 
@@ -452,19 +516,19 @@ const AdminHomeScreen: React.FC<AdminHomeScreenProps> = ({ navigation, userData 
     };
 
     const handleQuickStart = () => {
-    navigation.navigate('CreateSessionScreen', { 
-        mode: selectedMode 
-    });
-};
-
-  const handleProximityAlertTap = () => {
-    if (proximityAlert) {
-        setSelectedMode(proximityAlert.suggestedMode);
         navigation.navigate('CreateSessionScreen', { 
-            mode: proximityAlert.suggestedMode 
+            mode: selectedMode 
         });
-    }
-};
+    };
+
+    const handleProximityAlertTap = () => {
+        if (proximityAlert) {
+            setSelectedMode(proximityAlert.suggestedMode);
+            navigation.navigate('CreateSessionScreen', { 
+                mode: proximityAlert.suggestedMode 
+            });
+        }
+    };
 
     // --- Render Functions ---
     const renderPredictionModal = () => {
@@ -561,72 +625,66 @@ const AdminHomeScreen: React.FC<AdminHomeScreenProps> = ({ navigation, userData 
         </View>
     );
 
- // AdminHomeScreen.tsx - FIXED VERSION
-// Replace your renderProximityAlert function with this:
+    const renderProximityAlert = () => {
+        if (!proximityAlert) return null;
+        
+        const scale = rippleAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [1, 2.5],
+        });
+        
+        const opacity = rippleAnim.interpolate({
+            inputRange: [0, 0.5, 1],
+            outputRange: [0.8, 0.4, 0],
+        });
+        
+        return (
+            <TouchableOpacity 
+                style={styles.proximityAlert}
+                onPress={handleProximityAlertTap}
+                activeOpacity={0.8}
+            >
+                <View style={styles.rippleContainer}>
+                    <Animated.View
+                        style={[
+                            styles.ripple,
+                            {
+                                transform: [{ scale }],
+                                opacity,
+                            },
+                        ]}
+                    />
+                    <Animated.View
+                        style={[
+                            styles.ripple,
+                            {
+                                transform: [{ scale: scale.interpolate({
+                                    inputRange: [1, 2.5],
+                                    outputRange: [1, 2],
+                                })}],
+                                opacity: opacity.interpolate({
+                                    inputRange: [0, 0.8],
+                                    outputRange: [0, 0.4],
+                                }),
+                            },
+                        ]}
+                    />
+                    <Icon name="sensors" size={24} color="#F59E0B" />
+                </View>
+                
+                <View style={{flex: 1, marginLeft: 12}}>
+                    <Text style={styles.proximityTitle}>
+                        🔥 {proximityAlert.studentsDetected} Students Detected Nearby!
+                    </Text>
+                    <Text style={styles.proximitySubtitle}>
+                        Start {proximityAlert.suggestedMode} session now?
+                    </Text>
+                </View>
+                <Icon name="play-circle" size={32} color="#22C55E" />
+            </TouchableOpacity>
+        );
+    };
 
-const renderProximityAlert = () => {
-    // ✅ CORRECT: Check condition FIRST, before any transformations
-    if (!proximityAlert) return null;
-    
-    // Now safely create interpolations (these are NOT hooks)
-    const scale = rippleAnim.interpolate({
-        inputRange: [0, 1],
-        outputRange: [1, 2.5],
-    });
-    
-    const opacity = rippleAnim.interpolate({
-        inputRange: [0, 0.5, 1],
-        outputRange: [0.8, 0.4, 0],
-    });
-    
-    return (
-        <TouchableOpacity 
-            style={styles.proximityAlert}
-            onPress={handleProximityAlertTap}
-            activeOpacity={0.8}
-        >
-            <View style={styles.rippleContainer}>
-                <Animated.View
-                    style={[
-                        styles.ripple,
-                        {
-                            transform: [{ scale }],
-                            opacity,
-                        },
-                    ]}
-                />
-                <Animated.View
-                    style={[
-                        styles.ripple,
-                        {
-                            transform: [{ scale: scale.interpolate({
-                                inputRange: [1, 2.5],
-                                outputRange: [1, 2],
-                            })}],
-                            opacity: opacity.interpolate({
-                                inputRange: [0, 0.8],
-                                outputRange: [0, 0.4],
-                            }),
-                        },
-                    ]}
-                />
-                <Icon name="sensors" size={24} color="#F59E0B" />
-            </View>
-            
-            <View style={{flex: 1, marginLeft: 12}}>
-                <Text style={styles.proximityTitle}>
-                    🔥 {proximityAlert.studentsDetected} Students Detected Nearby!
-                </Text>
-                <Text style={styles.proximitySubtitle}>
-                    Start {proximityAlert.suggestedMode} session now?
-                </Text>
-            </View>
-            <Icon name="play-circle" size={32} color="#22C55E" />
-        </TouchableOpacity>
-    );
-};
-
-// ✅ That's it! Just moved the conditional return to the TOP
     const renderModeSelector = () => (
         <View style={styles.modeSelectorContainer}>
             {(['QR', 'NFC', 'SOUND'] as const).map((mode) => (
@@ -755,6 +813,37 @@ const renderProximityAlert = () => {
                 </View>
             )}
         </LinearGradient>
+    );
+
+    // ✅ NEW: BLE NEARBY BUTTON
+    const renderBLENearbyButton = () => (
+        <TouchableOpacity
+            style={[
+                styles.bleNearbyButton,
+                isBLEScanning && styles.bleNearbyButtonActive
+            ]}
+            onPress={isBLEScanning ? handleStopBLEScan : handleStartBLEScan}
+            activeOpacity={0.8}
+        >
+            <Icon 
+                name={isBLEScanning ? "bluetooth-connected" : "bluetooth-searching"} 
+                size={24} 
+                color={isBLEScanning ? "#22C55E" : "#3B82F6"} 
+            />
+            <View style={{flex: 1, marginLeft: 12}}>
+                <Text style={styles.bleNearbyTitle}>
+                    {isBLEScanning ? `${nearbyStudents.length} Students Nearby` : 'Scan Nearby Students'}
+                </Text>
+                <Text style={styles.bleNearbySubtitle}>
+                    {isBLEScanning ? 'Tap to stop scanning' : 'Detect students via Bluetooth'}
+                </Text>
+            </View>
+            {isBLEScanning && nearbyStudents.length > 0 && (
+                <View style={styles.bleBadge}>
+                    <Text style={styles.bleBadgeText}>{nearbyStudents.length}</Text>
+                </View>
+            )}
+        </TouchableOpacity>
     );
 
     const renderQuickActions = () => (
@@ -914,6 +1003,8 @@ const renderProximityAlert = () => {
                 {renderHeader()}
                 {renderProximityAlert()}
                 {renderModeSelector()}
+                {/* ✅ NEW: BLE NEARBY BUTTON */}
+                {renderBLENearbyButton()}
                 {renderLiveSession()}
                 {!liveSession.isActive && renderQuickActions()}
                 {renderAlerts()}
@@ -931,6 +1022,17 @@ const renderProximityAlert = () => {
             )}
             {renderPredictionModal()}
             {renderClassBottomSheet()}
+            
+            {/* ✅ NEW: NEARBY STUDENTS MODAL */}
+            <NearbyStudentsModal
+                visible={showNearbyModal}
+                students={nearbyStudents}
+                onClose={() => {
+                    setShowNearbyModal(false);
+                    handleStopBLEScan();
+                }}
+                onStartSession={handleStartSessionWithStudents}
+            />
         </>
     );
 };
@@ -980,6 +1082,50 @@ const styles = StyleSheet.create({
     proximitySubtitle: {
         fontSize: 14,
         color: '#B45309',
+    },
+    // ✅ NEW BLE BUTTON STYLES
+    bleNearbyButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FFF',
+        borderWidth: 2,
+        borderColor: '#3B82F6',
+        borderRadius: 16,
+        padding: 16,
+        marginHorizontal: 20,
+        marginBottom: 16,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+        elevation: 3,
+    },
+    bleNearbyButtonActive: {
+        backgroundColor: '#DCFCE7',
+        borderColor: '#22C55E',
+    },
+    bleNearbyTitle: {
+        fontSize: 16,
+        fontWeight: 'bold',
+        color: '#111827',
+        marginBottom: 4,
+    },
+    bleNearbySubtitle: {
+        fontSize: 13,
+        color: '#6B7280',
+    },
+    bleBadge: {
+        backgroundColor: '#22C55E',
+        borderRadius: 12,
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        minWidth: 24,
+        alignItems: 'center',
+    },
+    bleBadgeText: {
+        color: '#FFF',
+        fontSize: 14,
+        fontWeight: 'bold',
     },
     modeSelectorContainer: {
         flexDirection: 'row',

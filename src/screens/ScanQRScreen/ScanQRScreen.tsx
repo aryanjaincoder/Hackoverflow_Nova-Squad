@@ -27,17 +27,17 @@ import {
     useCodeScanner,
 } from 'react-native-vision-camera';
 
-// --- NAYA: FIREBASE IMPORTS ---
+// --- FIREBASE IMPORTS ---
 import auth from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
-// --- END NAYA IMPORTS ---
+// --- END IMPORTS ---
 
 // --- Navigation types ---
 type RootStackParamList = {
     ScanQRScreen: { sessionId: string; faceVerifiedToken: string };
     FaceScanScreen: { sessionId: string };
     Home: undefined;
-    SuccessScreen: { sessionId: string }; // <-- UPDATE YAHAN HAI
+    SuccessScreen: { sessionId: string };
 };
 
 type ScanQRScreenRouteProp = RouteProp<RootStackParamList, 'ScanQRScreen'>;
@@ -49,6 +49,7 @@ const SCANNING_AREA_SIZE = width * 0.7;
 interface QrCodeData {
     sessionId: string;
     token: string;
+    timestamp?: number; // Optional: Agar teacher side se aata hai
 }
 
 // --- AppNavigator se aane wale props ke liye Interface ---
@@ -56,20 +57,16 @@ interface UserData {
   name: string;
   email: string;
   role: 'student' | 'admin';
-  // ... AppNavigator se aane waale baaki props
 }
 
 interface ScanQRScreenProps {
-  userData: UserData; // Yeh prop ab AppNavigator se milega
-  navigation: ScanQRNavigationProp; // Navigation prop bhi pass hoga
-  route: ScanQRScreenRouteProp; // Route prop bhi pass hoga
+  userData: UserData;
+  navigation: ScanQRNavigationProp;
+  route: ScanQRScreenRouteProp;
 }
-// --- END FIX 1 ---
 
-
-// --- Dynamic Style Helpers (Same) ---
+// --- Dynamic Style Helpers ---
 const cornerStyle = (color: string, position: 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight') => {
-    // ... (code change nahi)
     const isTop = position.startsWith('top');
     const isLeft = position.endsWith('Left');
     const borderStyle = {
@@ -98,17 +95,10 @@ const getSquareFrameStyle = (color: string) => ({
     alignItems: 'center' as 'center',
     justifyContent: 'center' as 'center',
 });
-// --- End Style Helpers ---
 
-
-// --- Component definition ko badla gaya hai taaki 'userData' prop le sake ---
+// --- Main Component ---
 const ScanQRScreen: React.FC<ScanQRScreenProps> = ({ userData, navigation, route }) => {
-    // Hooks ab props se data lenge (ya use kar sakte hain)
-    // const navigation = useNavigation<ScanQRNavigationProp>(); // Yeh ab prop se aa raha hai
-    // const route = useRoute<ScanQRScreenRouteProp>(); // Yeh ab prop se aa raha hai
     const isFocused = useIsFocused();
-    
-    // --- NAYA: faceVerifiedToken ko params se nikalo ---
     const { sessionId, faceVerifiedToken } = route.params;
 
     // --- VISION CAMERA HOOKS ---
@@ -122,95 +112,145 @@ const ScanQRScreen: React.FC<ScanQRScreenProps> = ({ userData, navigation, route
         'ready' | 'processing' | 'success' | 'failed'
     >('ready');
 
-    // Permission Check on Mount (Same)
+    // Permission Check on Mount
     useEffect(() => {
         if (!hasPermission) {
             requestPermission();
         }
     }, [hasPermission, requestPermission]);
 
-    // Toggle Flash (Same)
+    // Toggle Flash
     const toggleFlash = () => {
         setFlashMode(prev => (prev === 'off' ? 'torch' : 'off'));
     };
 
-    // ---
-    // --- 1. MUKHYA LOGIC: markAttendance ---
-    // ---
+    // ===========================================
+    // UPDATED: markAttendance FUNCTION WITH VALIDATIONS
+    // ===========================================
     const markAttendance = useCallback(
         async (scannedData: QrCodeData) => {
             // Processing mein hai toh ruko
             if (scanStatus !== 'ready') return;
 
             setIsScanning(false);
-            setScanStatus('processing'); // Status ko 'processing' set karo
+            setScanStatus('processing');
 
             try {
-                // --- START: ASLI FIREBASE LOGIC ---
+                // ✅ 1. VALIDATION: Fetch current session data
+                const sessionDocRef = firestore()
+                    .collection('attendance_sessions')
+                    .doc(sessionId);
+                
+                const sessionDoc = await sessionDocRef.get();
 
-                // 1. QR code ko validate karo (Basic check)
-                if (scannedData.sessionId !== sessionId) {
-                    throw new Error('Invalid or expired QR code (Session ID mismatch).');
+                // Check if session exists
+                if (!sessionDoc.exists) {
+                    throw new Error('❌ Invalid QR - Session not found!');
                 }
 
-                // 2. Logged-in user ki details nikalo
+                const sessionData = sessionDoc.data();
+
+                // ✅ 2. VALIDATION: Check session status
+                if (sessionData?.status !== 'active') {
+                    throw new Error('❌ Session is closed or inactive!');
+                }
+
+                // ✅ 3. VALIDATION: Check if paused
+                if (sessionData?.isPaused) {
+                    throw new Error('⏸️ Attendance scanning is currently paused!');
+                }
+
+                // ✅ 4. VALIDATION: Token match check (SABSE IMPORTANT)
+                if (sessionData?.currentToken !== scannedData.token) {
+                    throw new Error('⏰ QR Code expired! Please scan the LATEST QR from the screen.');
+                }
+
+                // ✅ 5. VALIDATION: Timestamp check (10 seconds threshold)
+                if (sessionData?.lastTokenUpdate) {
+                    const currentTime = Date.now();
+                    const tokenAge = currentTime - sessionData.lastTokenUpdate;
+                    
+                    // Agar timestamp mila hai toh check karo
+                    if (scannedData.timestamp) {
+                        // Agar QR me timestamp hai toh usse check karo
+                        const qrAge = currentTime - scannedData.timestamp;
+                        if (qrAge > 10000) {
+                            throw new Error('⏰ QR too old! Scan the fresh QR code.');
+                        }
+                    } else if (tokenAge > 10000) {
+                        // Ya fir session ke lastTokenUpdate se check karo
+                        throw new Error('⏰ QR too old! Scan the fresh QR code.');
+                    }
+                }
+
+                // ✅ 6. Check if user is logged in
                 const currentUser = auth().currentUser;
                 if (!currentUser) {
-                    throw new Error('User not logged in. Please restart the app.');
+                    throw new Error('❌ User not logged in. Please restart the app.');
                 }
 
-                // --- 'studentData' object ab 'userData' prop se data lega ---
-                const studentData = {
-                    name: userData.name, // <-- PROP SE NAYA NAAM
-                    email: userData.email, // <-- PROP SE NAYA EMAIL
-                    uid: currentUser.uid,
-                    markedAt: firestore.FieldValue.serverTimestamp(), // Server ka time
-                    faceVerifiedToken: faceVerifiedToken, // FaceScan se mila token
-                };
-                // --- END FIX ---
-
-                // 4. Data ko 'attendees' sub-collection mein save karo
+                // ✅ 7. Check duplicate attendance
                 const attendeeDocRef = firestore()
                     .collection('attendance_sessions')
                     .doc(sessionId)
                     .collection('attendees')
-                    .doc(currentUser.uid); // Har user ki ek hi entry hogi (UID ko ID banaya)
+                    .doc(currentUser.uid);
+
+                const existingAttendee = await attendeeDocRef.get();
+                
+                if (existingAttendee.exists()) {
+                    throw new Error('✅ You have already marked attendance for this session!');
+                }
+
+                // ✅ 8. All validations passed - Mark attendance
+                const studentData = {
+                    name: userData.name,
+                    email: userData.email,
+                    uid: currentUser.uid,
+                    markedAt: firestore.FieldValue.serverTimestamp(),
+                    faceVerifiedToken: faceVerifiedToken,
+                    scannedToken: scannedData.token, // Track which token was used
+                    locationVerified: true,
+                    bleVerified: false,
+                };
 
                 await attendeeDocRef.set(studentData);
 
-                // --- END: ASLI FIREBASE LOGIC ---
-
-                // 5. Success!
+                // ✅ 9. Success!
                 setScanStatus('success');
-
-                // --- UPDATE YAHAN HAI ---
-                // Ab Alert nahi, seedha SuccessScreen par navigate karenge
-                // 'replace' use kiya taaki user back karke QR screen par na aa sake
+                
+                // Navigate to success screen
                 navigation.replace('SuccessScreen', {
                     sessionId: sessionId,
                 });
-                // --- UPDATE END ---
 
             } catch (error: any) {
-                // 6. Fail ho gaya
+                // Error handling
                 setScanStatus('failed');
-                Alert.alert('Attendance Failed', error.message || 'An unknown error occurred.', [
-                    {
-                        text: 'Try Again',
-                        onPress: () => {
-                            setScanStatus('ready');
-                            setIsScanning(true); // Scanning dobara chalu karo
+                Alert.alert(
+                    'Attendance Failed', 
+                    error.message || 'An unknown error occurred.', 
+                    [
+                        {
+                            text: 'Try Again',
+                            onPress: () => {
+                                setScanStatus('ready');
+                                setIsScanning(true);
+                            },
                         },
-                    },
-                    { text: 'Cancel', onPress: () => navigation.navigate('Home'), style: 'cancel' },
-                ]);
+                        { 
+                            text: 'Cancel', 
+                            onPress: () => navigation.navigate('Home'), 
+                            style: 'cancel' 
+                        },
+                    ]
+                );
             }
         },
-        // --- 'userData' ko dependency array mein add kiya gaya ---
         [sessionId, scanStatus, navigation, faceVerifiedToken, userData],
     );
 
-    // 2. VisionCamera Code Scanner Hook (Same)
+    // 2. VisionCamera Code Scanner Hook
     const codeScanner = useCodeScanner({
         codeTypes: ['qr'],
         onCodeScanned: (codes) => {
@@ -219,12 +259,12 @@ const ScanQRScreen: React.FC<ScanQRScreenProps> = ({ userData, navigation, route
             const scannedCode = codes[0].value;
             if (!scannedCode) return;
 
-            setIsScanning(false); // Scanning turant band karo
+            setIsScanning(false);
 
             try {
                 const qrData: QrCodeData = JSON.parse(scannedCode);
                 if (qrData.sessionId && qrData.token) {
-                    markAttendance(qrData); // Hamara naya function call karo
+                    markAttendance(qrData);
                 } else {
                     Alert.alert('Invalid QR', 'This QR code is not for attendance. Try again.', [
                         { text: 'OK', onPress: () => setIsScanning(true) }
@@ -238,9 +278,7 @@ const ScanQRScreen: React.FC<ScanQRScreenProps> = ({ userData, navigation, route
         },
     });
 
-    // --- BAAKI KA UI (Permission, Loading, Return) ---
-    // --- (Ye sab pehle jaisa hi hai, koi change nahi) ---
-
+    // --- UI RENDERING ---
     if (!hasPermission) {
         return (
             <View style={[styles.container, styles.center]}>
@@ -331,7 +369,7 @@ const ScanQRScreen: React.FC<ScanQRScreenProps> = ({ userData, navigation, route
     );
 };
 
-// --- Styles (Same) ---
+// --- Styles ---
 const styles = StyleSheet.create({
     container: {
         flex: 1,
@@ -345,6 +383,7 @@ const styles = StyleSheet.create({
         color: '#fff',
         marginTop: 20,
         textAlign: 'center',
+        paddingHorizontal: 20,
     },
     overlay: {
         flex: 1,
@@ -390,6 +429,7 @@ const styles = StyleSheet.create({
         color: '#DDD',
         textAlign: 'center',
         marginBottom: 20,
+        lineHeight: 20,
     },
     statusBox: {
         width: '100%',

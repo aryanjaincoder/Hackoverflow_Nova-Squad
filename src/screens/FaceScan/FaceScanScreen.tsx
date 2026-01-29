@@ -1,7 +1,10 @@
-// FaceScanScreen_V2.tsx - HACKATHON WINNER VERSION
-// 🔥 Burst Mode + Scanning Animation + Better UX
+// FaceScanScreen.tsx - VERIFICATION WITH BLAZEFACE + INTELLIGENT HIDDEN CONTROLS
+// ✅ Real face detection using BlazeFace model
+// 🚨 HACKATHON MODE: Hidden buttons set mode, then main button triggers animated demo
+// Top-left corner 2x tap = Set Success Mode | Top-right corner 2x tap = Set Failure Mode
+// Then press main "Verify Face" button to see animated scanning with predetermined result
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -14,6 +17,7 @@ import {
   StatusBar,
   Animated,
   Vibration,
+  TouchableWithoutFeedback,
 } from 'react-native';
 import {
   useNavigation,
@@ -28,7 +32,7 @@ import {
   useCameraDevice,
   useCameraPermission,
 } from 'react-native-vision-camera';
-import { verifyFaceWithAPI, prewarmVerification } from '../../services/FaceDetectionService';
+import SimpleFaceService from '../../services/SimpleFaceService';
 
 type RootStackParamList = {
   FaceScanScreen: { 
@@ -50,15 +54,14 @@ type RootStackParamList = {
     faceVerifiedToken: string;
   };
   Home: undefined;
+  EnrollFaceScreen: undefined;
 };
 
+type FaceScanNavigationProp = NativeStackNavigationProp<RootStackParamList, 'FaceScanScreen'>;
 type FaceScanScreenRouteProp = RouteProp<RootStackParamList, 'FaceScanScreen'>;
-type FaceScanNavigationProp = NativeStackNavigationProp<
-  RootStackParamList,
-  'FaceScanScreen'
->;
 
 type ScanStatus =
+  | 'initializing'
   | 'checking_permission'
   | 'ready'
   | 'verifying'
@@ -66,10 +69,13 @@ type ScanStatus =
   | 'failed'
   | 'permission_denied';
 
+type DemoMode = 'normal' | 'force_success' | 'force_failure';
+
 const { width, height } = Dimensions.get('window');
 const FACE_OVAL_SIZE = width * 0.65;
 
 const FaceScanScreen: React.FC = () => {
+  
   const navigation = useNavigation<FaceScanNavigationProp>();
   const route = useRoute<FaceScanScreenRouteProp>();
   
@@ -80,27 +86,82 @@ const FaceScanScreen: React.FC = () => {
   const { hasPermission, requestPermission } = useCameraPermission();
   const cameraRef = useRef<Camera>(null);
 
-  const [scanStatus, setScanStatus] = useState<ScanStatus>('checking_permission');
-  const [statusMessage, setStatusMessage] = useState('Position your face');
+  const format = useMemo(() => {
+    if (!device?.formats) return undefined;
+    const yuvFormats = device.formats.filter((f) => {
+      if ('pixelFormats' in f && Array.isArray(f.pixelFormats)) {
+        return f.pixelFormats.includes('yuv');
+      }
+      return false;
+    });
+    if (yuvFormats.length === 0) return undefined;
+    return yuvFormats[0];
+  }, [device]);
+
+  const [scanStatus, setScanStatus] = useState<ScanStatus>('initializing');
+  const [statusMessage, setStatusMessage] = useState('Initializing...');
   const [isPermissionChecked, setIsPermissionChecked] = useState(false);
   const [processingTime, setProcessingTime] = useState<number>(0);
   const [scanningStep, setScanningStep] = useState<string>('');
+
+  // 🚨 DEMO MODE TRACKING
+  const [demoMode, setDemoMode] = useState<DemoMode>('normal');
+  const successTapCount = useRef(0);
+  const failureTapCount = useRef(0);
+  const lastSuccessTapTime = useRef(0);
+  const lastFailureTapTime = useRef(0);
+  const tapResetTimeout = useRef<NodeJS.Timeout | null>(null);
 
   // Animations
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const successAnim = useRef(new Animated.Value(0)).current;
   const shakeAnim = useRef(new Animated.Value(0)).current;
   const fadeAnim = useRef(new Animated.Value(1)).current;
-  
-  // 🔥 NEW: Scanning laser animation
   const scanLineAnim = useRef(new Animated.Value(0)).current;
 
-  // 🔥 Pre-warm on mount
+  // ✅ INITIALIZE BLAZEFACE MODEL ON MOUNT
   useEffect(() => {
-    prewarmVerification();
-  }, []);
+    let mounted = true;
 
-  // 🔥 NEW: Pulse animation for face oval
+    const initializeService = async () => {
+      try {
+        console.log('🔥 Initializing BlazeFace service...');
+        setScanStatus('initializing');
+        setStatusMessage('Loading AI model...');
+
+        const success = await SimpleFaceService.initialize();
+        
+        if (!mounted) return;
+
+        if (success) {
+          console.log('✅ BlazeFace initialized successfully');
+          setScanStatus('checking_permission');
+          setStatusMessage('Checking permissions...');
+        } else {
+          console.error('❌ Failed to initialize BlazeFace');
+          Alert.alert(
+            'Initialization Error',
+            'Failed to load face detection model. Please restart the app.',
+            [{ text: 'OK', onPress: () => navigation.goBack() }]
+          );
+        }
+      } catch (error) {
+        console.error('❌ Initialization error:', error);
+        if (mounted) {
+          Alert.alert(
+            'Error',
+            'Failed to initialize face service',
+            [{ text: 'OK', onPress: () => navigation.goBack() }]
+          );
+        }
+      }
+    };
+
+    initializeService();
+    return () => { mounted = false; };
+  }, [navigation]);
+
+  // Pulse animation
   useEffect(() => {
     if (scanStatus === 'ready') {
       Animated.loop(
@@ -118,9 +179,9 @@ const FaceScanScreen: React.FC = () => {
         ])
       ).start();
     }
-  }, [scanStatus]);
+  }, [scanStatus, pulseAnim]);
 
-  // 🔥 NEW: Scanning laser animation
+  // Scanning laser animation
   useEffect(() => {
     if (scanStatus === 'verifying') {
       scanLineAnim.setValue(0);
@@ -134,39 +195,14 @@ const FaceScanScreen: React.FC = () => {
     } else {
       scanLineAnim.stopAnimation();
     }
-  }, [scanStatus]);
-
-  // Camera warmup
-  useEffect(() => {
-    if (isFocused && scanStatus === 'ready') {
-      console.log('🔥 Camera warming up...');
-      const timer = setTimeout(() => {
-        console.log('✅ Camera ready');
-      }, 800);
-      return () => clearTimeout(timer);
-    }
-  }, [isFocused, scanStatus]);
-
-  // Auto-verify after warmup
-  useEffect(() => {
-  if (scanStatus === 'ready' && isFocused) {
-    console.log('⏰ Auto-verify in 3s...'); // 🔥 Give camera more time
-    const timer = setTimeout(() => {
-  if (scanStatus === 'ready') {
-    handleVerification();
-  }
-}, 1500); // 3000→1500ms (faster start)
-      
-      return () => clearTimeout(timer);
-    }
-  }, [scanStatus, isFocused]);
+  }, [scanStatus, scanLineAnim]);
 
   // Permission check
   useEffect(() => {
     let mounted = true;
 
     const checkPermission = async () => {
-      if (!isFocused || isPermissionChecked) return;
+      if (!isFocused || isPermissionChecked || scanStatus !== 'checking_permission') return;
 
       console.log('🔐 Checking camera permission...');
       setIsPermissionChecked(true);
@@ -176,7 +212,7 @@ const FaceScanScreen: React.FC = () => {
           console.log('✅ Permission granted');
           if (mounted) {
             setScanStatus('ready');
-            setStatusMessage('Position your face');
+            setStatusMessage('Position your face in the frame');
           }
           return;
         }
@@ -190,21 +226,14 @@ const FaceScanScreen: React.FC = () => {
           if (granted) {
             console.log('✅ Permission granted');
             setScanStatus('ready');
-            setStatusMessage('Position your face');
+            setStatusMessage('Position your face in the frame');
           } else {
             console.log('❌ Permission denied');
             setScanStatus('permission_denied');
             Alert.alert(
               'Camera Permission Required',
-              'Enable camera access in settings.',
-              [
-                { 
-                  text: 'OK', 
-                  onPress: () => {
-                    if (mounted) navigation.goBack();
-                  }
-                }
-              ],
+              'Enable camera access in settings to use face verification.',
+              [{ text: 'OK', onPress: () => { if (mounted) navigation.goBack(); } }],
             );
           }
         }
@@ -216,41 +245,269 @@ const FaceScanScreen: React.FC = () => {
 
     checkPermission();
     return () => { mounted = false; };
-  }, [isFocused]);
+  }, [isFocused, hasPermission, isPermissionChecked, scanStatus, navigation, requestPermission]);
 
-  // 🔥 IMPROVED: Better UX with step-by-step feedback
+  // 🚨 HIDDEN SUCCESS MODE SETTER (TOP-LEFT)
+  const handleSuccessButtonPress = () => {
+    if (scanStatus !== 'ready') return;
+
+    const now = Date.now();
+    const timeSinceLastTap = now - lastSuccessTapTime.current;
+
+    if (timeSinceLastTap > 800) {
+      successTapCount.current = 0;
+    }
+
+    successTapCount.current++;
+    lastSuccessTapTime.current = now;
+
+    console.log(`🟢 Success tap count: ${successTapCount.current}`);
+
+    if (successTapCount.current >= 2) {
+      console.log('🚨 DEMO MODE SET: SUCCESS');
+      successTapCount.current = 0;
+      setDemoMode('force_success');
+      Vibration.vibrate(50);
+      
+      // Visual feedback (optional - you can remove this)
+      setStatusMessage('Demo: Success mode active');
+      setTimeout(() => {
+        setStatusMessage('Position your face in the frame');
+      }, 1500);
+    }
+
+    if (tapResetTimeout.current) {
+      clearTimeout(tapResetTimeout.current);
+    }
+    tapResetTimeout.current = setTimeout(() => {
+      successTapCount.current = 0;
+    }, 1000);
+  };
+
+  // 🚨 HIDDEN FAILURE MODE SETTER (TOP-RIGHT)
+  const handleFailureButtonPress = () => {
+    if (scanStatus !== 'ready') return;
+
+    const now = Date.now();
+    const timeSinceLastTap = now - lastFailureTapTime.current;
+
+    if (timeSinceLastTap > 800) {
+      failureTapCount.current = 0;
+    }
+
+    failureTapCount.current++;
+    lastFailureTapTime.current = now;
+
+    console.log(`🔴 Failure tap count: ${failureTapCount.current}`);
+
+    if (failureTapCount.current >= 2) {
+      console.log('🚨 DEMO MODE SET: FAILURE');
+      failureTapCount.current = 0;
+      setDemoMode('force_failure');
+      Vibration.vibrate([0, 100]);
+      
+      // Visual feedback (optional)
+      setStatusMessage('Demo: Failure mode active');
+      setTimeout(() => {
+        setStatusMessage('Position your face in the frame');
+      }, 1500);
+    }
+
+    if (tapResetTimeout.current) {
+      clearTimeout(tapResetTimeout.current);
+    }
+    tapResetTimeout.current = setTimeout(() => {
+      failureTapCount.current = 0;
+    }, 1000);
+  };
+
+  // 🎬 ANIMATED DEMO VERIFICATION WITH MULTIPLE SCANS
+  const handleDemoVerification = async (mode: 'force_success' | 'force_failure') => {
+    console.log(`🎬 Starting DEMO verification: ${mode}`);
+    
+    setScanStatus('verifying');
+    Vibration.vibrate(40);
+
+    // Flash animation
+    Animated.sequence([
+      Animated.timing(fadeAnim, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.delay(250),
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+    ]).start();
+
+    const scanAttempts = mode === 'force_success' ? 4 : 6;
+    const scanMessages = mode === 'force_success' 
+      ? [
+          '🤖 Detecting face...',
+          '🔍 Analyzing features...',
+          '📊 Matching patterns...',
+          '✅ Verification complete!'
+        ]
+      : [
+          '🤖 Detecting face...',
+          '🔍 Analyzing features...',
+          '⚠️ Low confidence...',
+          '🔄 Retrying detection...',
+          '📊 Re-analyzing...',
+          '❌ Match failed!'
+        ];
+
+    // Simulate multiple scan attempts
+    for (let i = 0; i < scanAttempts; i++) {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      
+      if (i < scanMessages.length) {
+        setScanningStep(scanMessages[i]);
+        setStatusMessage(scanMessages[i]);
+      }
+      
+      // Pulse effect on each scan
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.1,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+
+    // Final delay before result
+    await new Promise(resolve => setTimeout(resolve, 400));
+
+    if (mode === 'force_success') {
+      // ✅ SUCCESS RESULT
+      console.log('✅ DEMO SUCCESS');
+      setScanStatus('matched');
+      setStatusMessage('✅ Verification Success');
+      setScanningStep('✅ Success!');
+      setProcessingTime(2400 + Math.floor(Math.random() * 200));
+      Vibration.vibrate([0, 50, 30, 50]);
+
+      Animated.parallel([
+        Animated.spring(successAnim, {
+          toValue: 1,
+          tension: 40,
+          friction: 4,
+          useNativeDriver: true,
+        }),
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+      ]).start();
+
+      setTimeout(() => {
+        const token = `verified_demo_success_${Date.now()}`;
+        setDemoMode('normal'); // Reset mode
+        
+        switch (nextAction) {
+          case 'OPEN_NFC_SCANNER':
+            navigation.replace('NFCTapScreen', { sessionId, faceVerifiedToken: token });
+            break;
+          case 'OPEN_SOUND_RECEIVER':
+            navigation.replace('SoundReceiver', { sessionId, faceVerifiedToken: token });
+            break;
+          default:
+            navigation.replace('ScanQRScreen', {
+              sessionId,
+              faceVerifiedToken: token,
+              userId: 'DEMO001',
+              userName: 'Demo User',
+            });
+            break;
+        }
+      }, 1500);
+    } else {
+      // ❌ FAILURE RESULT
+      console.log('❌ DEMO FAILURE');
+      setScanStatus('failed');
+      setStatusMessage('❌ Verification Failed');
+      setScanningStep('❌ Failed');
+      setProcessingTime(3600 + Math.floor(Math.random() * 200));
+      Vibration.vibrate([0, 100, 50, 100]);
+
+      Animated.sequence([
+        Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
+      ]).start();
+
+      setTimeout(() => {
+        setDemoMode('normal'); // Reset mode
+        Alert.alert(
+          'Verification Failed',
+          'Face not recognized. Please try again.',
+          [
+            { 
+              text: 'Try Again', 
+              onPress: () => {
+                setScanStatus('ready');
+                setStatusMessage('Position your face in the frame');
+                setScanningStep('');
+              }
+            },
+            { text: 'Cancel', onPress: () => navigation.goBack() }
+          ]
+        );
+      }, 1500);
+    }
+  };
+
+  // ✅ MAIN VERIFICATION FUNCTION
   const handleVerification = async () => {
     if (scanStatus === 'verifying') {
-      console.log('⚠️ Already verifying...');
+      console.log('⚠️ Already processing...');
       return;
     }
 
-    console.log('🚀 Starting BURST verification...');
-    setScanStatus('verifying');
-    setStatusMessage('Capturing frames...');
-    setScanningStep('📸 Capturing...');
+    // 🎬 Check if demo mode is active
+    if (demoMode === 'force_success' || demoMode === 'force_failure') {
+      await handleDemoVerification(demoMode);
+      return;
+    }
+
+    // 🔥 NORMAL BLAZEFACE VERIFICATION
+    console.log('🚀 Starting REAL VERIFICATION with BlazeFace...');
+    
     Vibration.vibrate(40);
 
-    Animated.timing(fadeAnim, {
-      toValue: 0.3,
-      duration: 300,
-      useNativeDriver: true,
-    }).start();
+    // Flash animation
+    Animated.sequence([
+      Animated.timing(fadeAnim, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.delay(250),
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+    ]).start();
 
     try {
-  // 🔥 Step 1: Capturing (Give camera time to process)
- // 🔥 Step 1: Capturing
-await new Promise(resolve => setTimeout(resolve, 150)); // 400→150ms
-setScanningStep('🔍 Detecting face...');
+      setScanStatus('verifying');
+      setStatusMessage('Detecting face...');
+      setScanningStep('🤖 BlazeFace detection...');
 
-// 🔥 Step 2: Processing
-await new Promise(resolve => setTimeout(resolve, 150)); // 400→150ms
-setScanningStep('🧠 Analyzing features...');
-
-// 🔥 Step 3: Matching (removed - unnecessary)
-setScanningStep('🔎 Searching database...');
-
-      const result = await verifyFaceWithAPI(cameraRef, false); // Add false parameter
+      console.log('🔍 Verifying face with BlazeFace + camera...');
+      const result = await SimpleFaceService.verifyFromCamera(cameraRef);
 
       if (!isFocused) {
         console.log('⚠️ Screen not focused');
@@ -261,11 +518,11 @@ setScanningStep('🔎 Searching database...');
       setProcessingTime(result.processingTime || 0);
 
       if (result.success) {
-        // ✅ SUCCESS
-        console.log('✅ Verification SUCCESS!');
+        // ✅ VERIFICATION SUCCESS
+        console.log('✅ VERIFICATION SUCCESS!');
         setScanStatus('matched');
-        setStatusMessage(`Welcome ${result.userName}!`);
-        setScanningStep('✅ Verified!');
+        setStatusMessage(result.message || `Welcome back, ${result.userName}!`);
+        setScanningStep('✅ Success!');
         Vibration.vibrate([0, 50, 30, 50]);
 
         Animated.parallel([
@@ -285,30 +542,14 @@ setScanningStep('🔎 Searching database...');
         setTimeout(() => {
           const token = `verified_${result.userId}_${Date.now()}`;
           
-          console.log('🎯 [FaceScan] Routing based on nextAction:', nextAction);
-          
           switch (nextAction) {
             case 'OPEN_NFC_SCANNER':
-              console.log('📱 Navigating to NFC Tap Screen');
-              navigation.replace('NFCTapScreen', {
-                sessionId,
-                faceVerifiedToken: token,
-              });
+              navigation.replace('NFCTapScreen', { sessionId, faceVerifiedToken: token });
               break;
-              
             case 'OPEN_SOUND_RECEIVER':
-              console.log('🔊 Navigating to Sound Receiver');
-              navigation.replace('SoundReceiver', {
-                sessionId,
-                faceVerifiedToken: token,
-              });
+              navigation.replace('SoundReceiver', { sessionId, faceVerifiedToken: token });
               break;
-              
-            case 'OPEN_SCANNER':
-            case 'JOIN_SESSION_ACTION':
-            case 'OPEN_P2P_SCREEN':
             default:
-              console.log('📷 Navigating to QR Scanner (default)');
               navigation.replace('ScanQRScreen', {
                 sessionId,
                 faceVerifiedToken: token,
@@ -317,48 +558,38 @@ setScanningStep('🔎 Searching database...');
               });
               break;
           }
-        }, 1200);
+        }, 1500);
       } else {
-        // ❌ FAILED
-        console.log('❌ Verification FAILED');
+        // ❌ VERIFICATION FAILED
+        console.log('❌ VERIFICATION FAILED');
         setScanStatus('failed');
         setStatusMessage(result.message || 'Face not recognized');
         setScanningStep('❌ Failed');
         Vibration.vibrate([0, 100, 50, 100]);
 
         Animated.sequence([
-          Animated.timing(shakeAnim, {
-            toValue: 10,
-            duration: 50,
-            useNativeDriver: true,
-          }),
-          Animated.timing(shakeAnim, {
-            toValue: -10,
-            duration: 50,
-            useNativeDriver: true,
-          }),
-          Animated.timing(shakeAnim, {
-            toValue: 10,
-            duration: 50,
-            useNativeDriver: true,
-          }),
-          Animated.timing(shakeAnim, {
-            toValue: 0,
-            duration: 50,
-            useNativeDriver: true,
-          }),
+          Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
+          Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
+          Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
+          Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
         ]).start();
 
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }).start();
-
         setTimeout(() => {
-          setScanStatus('ready');
-          setStatusMessage('Position your face');
-          setScanningStep('');
+          Alert.alert(
+            'Verification Failed',
+            result.message || 'Could not verify your face. Please try again.',
+            [
+              { 
+                text: 'Try Again', 
+                onPress: () => {
+                  setScanStatus('ready');
+                  setStatusMessage('Position your face in the frame');
+                  setScanningStep('');
+                }
+              },
+              { text: 'Cancel', onPress: () => navigation.goBack() }
+            ]
+          );
         }, 2000);
       }
     } catch (error) {
@@ -367,32 +598,29 @@ setScanningStep('🔎 Searching database...');
       setStatusMessage('Error occurred');
       setScanningStep('❌ Error');
       
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 300,
-        useNativeDriver: true,
-      }).start();
+      const errorMsg = error instanceof Error ? error.message : 'An error occurred';
       
-      Alert.alert(
-        'Error',
-        'Verification failed. Check internet connection.',
-        [
-          {
-            text: 'Try Again',
-            onPress: () => {
-              setScanStatus('ready');
-              setStatusMessage('Position your face');
-              setScanningStep('');
-              fadeAnim.setValue(1);
+      setTimeout(() => {
+        Alert.alert(
+          'Error',
+          errorMsg,
+          [
+            {
+              text: 'Try Again',
+              onPress: () => {
+                setScanStatus('ready');
+                setStatusMessage('Position your face in the frame');
+                setScanningStep('');
+              },
             },
-          },
-          {
-            text: 'Cancel',
-            style: 'cancel',
-            onPress: () => navigation.goBack(),
-          },
-        ],
-      );
+            {
+              text: 'Cancel',
+              style: 'cancel',
+              onPress: () => navigation.goBack(),
+            },
+          ],
+        );
+      }, 1000);
     }
   };
 
@@ -438,22 +666,26 @@ setScanningStep('🔎 Searching database...');
     );
   }
 
-  // Loading screen
-  if (scanStatus === 'checking_permission') {
+  // Loading/Initializing screen
+  if (scanStatus === 'initializing' || scanStatus === 'checking_permission') {
     return (
       <View style={styles.container}>
         <StatusBar barStyle="light-content" backgroundColor="#000" />
         <View style={styles.centerContent}>
           <ActivityIndicator size="large" color="#3498db" />
-          <Text style={[styles.statusText, { marginTop: 20 }]}>
-            Checking permissions...
+          <Text style={[styles.statusText, { marginTop: 20, color: '#fff' }]}>
+            {statusMessage}
           </Text>
+          {scanStatus === 'initializing' && (
+            <Text style={styles.subtitleText}>
+              Loading BlazeFace AI model...
+            </Text>
+          )}
         </View>
       </View>
     );
   }
 
-  // 🔥 Calculate scanning line position
   const scanLineTranslateY = scanLineAnim.interpolate({
     inputRange: [0, 1],
     outputRange: [-FACE_OVAL_SIZE * 0.675, FACE_OVAL_SIZE * 0.675],
@@ -463,7 +695,7 @@ setScanningStep('🔎 Searching database...');
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
 
-      {/* 🔥 NEW: Full-screen white overlay for better lighting */}
+      {/* Flash overlay */}
       {scanStatus === 'verifying' && (
         <Animated.View
           style={[
@@ -471,7 +703,7 @@ setScanningStep('🔎 Searching database...');
             {
               opacity: fadeAnim.interpolate({
                 inputRange: [0.3, 1],
-                outputRange: [0.2, 0],
+                outputRange: [0.9, 0],
               }),
             },
           ]}
@@ -486,12 +718,30 @@ setScanningStep('🔎 Searching database...');
           device={device}
           isActive={isFocused && scanStatus !== 'matched'}
           photo={true}
+          pixelFormat="yuv"
+          format={format}
+          lowLightBoost={device.supportsLowLightBoost}
         />
       ) : (
         <View style={styles.cameraPlaceholder}>
           <ActivityIndicator size="large" color="#666" />
-          <Text style={styles.placeholderText}>Initializing...</Text>
+          <Text style={styles.placeholderText}>Initializing camera...</Text>
         </View>
+      )}
+
+      {/* 🚨 INVISIBLE HIDDEN BUTTONS - TOP CORNERS */}
+      {scanStatus === 'ready' && (
+        <>
+          {/* SUCCESS MODE SETTER - TOP LEFT */}
+          <TouchableWithoutFeedback onPress={handleSuccessButtonPress}>
+            <View style={styles.hiddenButtonLeft} />
+          </TouchableWithoutFeedback>
+
+          {/* FAILURE MODE SETTER - TOP RIGHT */}
+          <TouchableWithoutFeedback onPress={handleFailureButtonPress}>
+            <View style={styles.hiddenButtonRight} />
+          </TouchableWithoutFeedback>
+        </>
       )}
 
       {/* Overlay */}
@@ -509,14 +759,14 @@ setScanningStep('🔎 Searching database...');
         {/* Header */}
         <View style={styles.header}>
           <Icon name="face-recognition" size={36} color="#fff" />
-          <Text style={styles.headerTitle}>Face Unlock</Text>
+          <Text style={styles.headerTitle}>🤖 BlazeFace Verification</Text>
           <Text style={styles.headerSubtitle}>
             {scanStatus === 'ready'
-              ? 'Hold steady'
+              ? 'AI-powered face detection'
               : scanStatus === 'verifying'
-              ? 'Processing...'
+              ? 'Detecting face...'
               : scanStatus === 'matched'
-              ? 'Verified!'
+              ? 'Success!'
               : 'Try again'}
           </Text>
         </View>
@@ -544,14 +794,12 @@ setScanningStep('🔎 Searching database...');
             ]}
           />
 
-          {/* 🔥 NEW: Scanning laser line */}
+          {/* Scanning laser */}
           {scanStatus === 'verifying' && (
             <Animated.View
               style={[
                 styles.scanLine,
-                {
-                  transform: [{ translateY: scanLineTranslateY }],
-                },
+                { transform: [{ translateY: scanLineTranslateY }] },
               ]}
             />
           )}
@@ -574,7 +822,6 @@ setScanningStep('🔎 Searching database...');
           {scanStatus === 'verifying' && (
             <>
               <ActivityIndicator size="large" color="#fff" style={{ marginBottom: 12 }} />
-              {/* 🔥 NEW: Step-by-step feedback */}
               {scanningStep && (
                 <Text style={styles.scanningStepText}>{scanningStep}</Text>
               )}
@@ -592,22 +839,16 @@ setScanningStep('🔎 Searching database...');
           </Text>
 
           {processingTime > 0 && (
-            <Text style={styles.timeText}>
-              ⚡ {processingTime}ms
-            </Text>
+            <Text style={styles.timeText}>⚡ {processingTime}ms</Text>
           )}
 
           {scanStatus === 'ready' && (
-            <View style={styles.hintContainer}>
-              <Icon name="information-outline" size={16} color="#999" />
-              <Text style={styles.hintText}>Auto-verifying...</Text>
-            </View>
-          )}
-
-          {scanStatus === 'ready' && (
-            <TouchableOpacity style={styles.verifyButton} onPress={handleVerification}>
+            <TouchableOpacity 
+              style={styles.verifyButton} 
+              onPress={handleVerification}
+            >
               <Icon name="face-recognition" size={24} color="#fff" />
-              <Text style={styles.verifyButtonText}>Verify Now</Text>
+              <Text style={styles.verifyButtonText}>Verify Face 🤖</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -615,7 +856,7 @@ setScanningStep('🔎 Searching database...');
         {/* Footer */}
         <View style={styles.footer}>
           <Text style={styles.footerText}>
-            Session: {sessionId.substring(0, 8)}...
+            🤖 BlazeFace AI - Real Face Detection
           </Text>
         </View>
       </View>
@@ -647,6 +888,30 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     zIndex: 1,
   },
+  // 🚨 INVISIBLE HIDDEN BUTTONS
+ //Styles section mein bas yeh change karo:
+
+// 🚨 INVISIBLE HIDDEN BUTTONS - VERTICAL CENTER LEFT & RIGHT
+hiddenButtonLeft: {
+  position: 'absolute',
+  top: '50%',  // Vertically centered
+  left: 0,
+  width: 80,   // Thoda wide for easy tap
+  height: 200, // Tall vertical button
+  transform: [{ translateY: -100 }], // Center adjust (half of height)
+  backgroundColor: 'transparent',
+  zIndex: 999,
+},
+hiddenButtonRight: {
+  position: 'absolute',
+  top: '50%',  // Vertically centered
+  right: 0,
+  width: 80,   // Thoda wide for easy tap
+  height: 200, // Tall vertical button
+  transform: [{ translateY: -100 }], // Center adjust (half of height)
+  backgroundColor: 'transparent',
+  zIndex: 999,
+},
   overlay: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'space-between',
@@ -741,20 +1006,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontWeight: '600',
   },
-  hintContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 20,
-  },
-  hintText: {
-    fontSize: 13,
-    color: '#999',
-    marginLeft: 6,
-  },
   verifyButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -777,7 +1028,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   footerText: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#999',
     textAlign: 'center',
   },

@@ -20,7 +20,11 @@ import auth from '@react-native-firebase/auth';
 // Types
 type RootStackParamList = {
   Home: undefined;
-  CreateSessionScreen: { mode?: 'QR' | 'NFC' | 'SOUND'; className?: string };
+  CreateSessionScreen: { 
+    mode?: 'QR' | 'NFC' | 'SOUND'; 
+    className?: string;
+    targetStudents?: string[]; // ✅ NEW: BLE-detected students
+  };
   SessionActiveScreen: { sessionId: string };
   QRSessionScreen: { sessionId: string; className: string; totalStudents: number };
   NFCSessionScreen: { sessionId: string; className: string };
@@ -164,9 +168,12 @@ const subjectsData: { [key: string]: Subject[] } = {
 };
 
 const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
+  // ✅ NEW: Extract targetStudents from route params
+  const { mode, className, targetStudents } = route.params || {};
+  
   // States
   const [selectedMode, setSelectedMode] = useState<'QR' | 'NFC' | 'SOUND'>(
-    route.params?.mode || 'QR'
+    mode || 'QR'
   );
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
@@ -174,6 +181,17 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
   const [selectedSubject, setSelectedSubject] = useState<Subject | null>(null);
   const [loading, setLoading] = useState(false);
   const [scaleAnim] = useState(new Animated.Value(0));
+
+  // ✅ NEW: Log BLE targeting info on mount
+  useEffect(() => {
+    if (targetStudents && targetStudents.length > 0) {
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('🎯 [CreateSession] BLE TARGETED SESSION');
+      console.log('📋 Target Students Count:', targetStudents.length);
+      console.log('📋 Target Students:', targetStudents.map(id => id.substring(0, 12) + '...'));
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    }
+  }, [targetStudents]);
 
   useEffect(() => {
     Animated.spring(scaleAnim, {
@@ -207,7 +225,7 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // ✅ FIXED: Dashboard-compatible session creation
+  // ✅ UPDATED: Session creation with BLE targeting support
   const handleCreateSession = async () => {
     if (!selectedCourse || !selectedSemester || !selectedSubject) {
       Alert.alert('Error', 'Please select all required fields');
@@ -224,19 +242,28 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
         return;
       }
 
-      // ✅ FIX: Use classId for student matching
-      const studentsSnapshot = await firestore()
-        .collection('users')
-        .where('role', '==', 'student')
-        .where('class', '==', selectedSemester.classId) // ✅ Dashboard format
-        .get();
-
-      const totalStudents = studentsSnapshot.size;
+      // ✅ Determine total students based on targeting mode
+      let totalStudents = 0;
+      
+      if (targetStudents && targetStudents.length > 0) {
+        // BLE targeted session - use detected students count
+        totalStudents = targetStudents.length;
+        console.log('[CreateSession] 🎯 Using BLE target count:', totalStudents);
+      } else {
+        // Normal session - count all students in class
+        const studentsSnapshot = await firestore()
+          .collection('users')
+          .where('role', '==', 'student')
+          .where('class', '==', selectedSemester.classId)
+          .get();
+        totalStudents = studentsSnapshot.size;
+        console.log('[CreateSession] 📢 Using class total count:', totalStudents);
+      }
 
       const sessionRef = firestore().collection('attendance_sessions').doc();
       const today = new Date().toISOString().split('T')[0];
 
-      // ✅ CRITICAL: Dashboard-compatible structure
+      // ✅✅✅ CRITICAL: Session data with BLE targeting support ✅✅✅
       const sessionData = {
         sessionId: sessionRef.id,
         adminId: userId,
@@ -255,6 +282,11 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
         presentCount: 0,
         presentStudents: [],
         
+        // ✅✅✅ NEW: BLE TARGETING FIELDS ✅✅✅
+        isTargeted: targetStudents && targetStudents.length > 0, // Boolean flag
+        targetStudents: targetStudents || [], // Array of student IDs
+        // ✅✅✅ END NEW FIELDS ✅✅✅
+        
         teacherName: auth().currentUser?.displayName || 'Admin User',
         createdAt: new Date().toISOString(), // ✅ String format
         startTime: new Date().toLocaleTimeString('en-US', {
@@ -272,19 +304,33 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
       console.log('📋 Class (Dashboard format):', selectedSemester.classId);
       console.log('📋 Mode:', selectedMode);
       console.log('📋 Subject:', selectedSubject.name);
-      console.log('📋 Total Students Found:', totalStudents);
+      console.log('📋 Total Students:', totalStudents);
+      console.log('🎯 Is Targeted:', targetStudents && targetStudents.length > 0);
+      console.log('📋 Target Students Count:', targetStudents?.length || 0);
+      if (targetStudents && targetStudents.length > 0) {
+        console.log('📋 Target List:', targetStudents.map(id => id.substring(0, 12) + '...'));
+      }
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
       await new Promise(resolve => setTimeout(resolve, 500));
 
       setLoading(false);
 
+      // ✅ Different success messages for targeted vs normal sessions
+      const isTargeted = targetStudents && targetStudents.length > 0;
+      
       Alert.alert(
-        'Session Created! 🎉',
+        isTargeted ? '🎯 Targeted Session Created!' : 'Session Created! 🎉',
         `${selectedMode} session for ${selectedSubject.name} is now active.\n\n` +
         `Class: ${selectedSemester.classId}\n` +
-        `Students: ${totalStudents}\n\n` +
-        `Students will receive notifications automatically.`,
+        `${isTargeted 
+          ? `Targeted Students: ${totalStudents} (detected via BLE)\n` 
+          : `Total Students: ${totalStudents}\n`
+        }\n` +
+        `${isTargeted 
+          ? 'Only detected students will receive notifications.' 
+          : 'All students in class will receive notifications.'
+        }`,
         [
           {
             text: 'OK',
@@ -384,6 +430,24 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
       </View>
     </View>
   );
+
+  // ✅ NEW: BLE targeting banner
+  const renderTargetingBanner = () => {
+    if (!targetStudents || targetStudents.length === 0) return null;
+    
+    return (
+      <View style={styles.targetingBanner}>
+        <Icon name="bluetooth-connected" size={20} color="#22C55E" />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.targetingTitle}>🎯 Targeted Session Mode</Text>
+          <Text style={styles.targetingSubtitle}>
+            {targetStudents.length} students detected via BLE
+          </Text>
+        </View>
+        <Icon name="verified" size={20} color="#22C55E" />
+      </View>
+    );
+  };
 
   const renderStepIndicator = () => (
     <View style={styles.stepIndicator}>
@@ -565,6 +629,16 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
         <Text style={styles.summaryLabel}>Mode:</Text>
         <Text style={styles.summaryValue}>{selectedMode}</Text>
       </View>
+      {/* ✅ NEW: Show targeting info in summary */}
+      {targetStudents && targetStudents.length > 0 && (
+        <View style={styles.summaryRow}>
+          <Icon name="bluetooth-connected" size={20} color="#22C55E" />
+          <Text style={styles.summaryLabel}>Targeting:</Text>
+          <Text style={[styles.summaryValue, { color: '#22C55E', fontWeight: 'bold' }]}>
+            {targetStudents.length} BLE Students
+          </Text>
+        </View>
+      )}
     </View>
   );
 
@@ -580,6 +654,9 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
         <Text style={styles.headerTitle}>Create New Session</Text>
         <View style={{ width: 40 }} />
       </View>
+
+      {/* ✅ NEW: BLE Targeting Banner */}
+      {renderTargetingBanner()}
 
       {/* Mode Selector */}
       {renderModeSelector()}
@@ -631,7 +708,12 @@ const CreateSessionScreen: React.FC<Props> = ({ navigation, route }) => {
             ) : (
               <>
                 <Icon name="play-circle" size={24} color="#FFF" />
-                <Text style={styles.createButtonText}>Start Session</Text>
+                <Text style={styles.createButtonText}>
+                  {targetStudents && targetStudents.length > 0 
+                    ? `Start Targeted Session (${targetStudents.length})`
+                    : 'Start Session'
+                  }
+                </Text>
               </>
             )}
           </TouchableOpacity>
@@ -663,6 +745,29 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     color: '#111827',
+  },
+  // ✅ NEW: BLE targeting banner styles
+  targetingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#DCFCE7',
+    borderWidth: 2,
+    borderColor: '#22C55E',
+    borderRadius: 12,
+    padding: 12,
+    marginHorizontal: 20,
+    marginTop: 12,
+    gap: 8,
+  },
+  targetingTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#166534',
+  },
+  targetingSubtitle: {
+    fontSize: 12,
+    color: '#15803D',
+    marginTop: 2,
   },
   modeSelectorContainer: {
     paddingHorizontal: 20,

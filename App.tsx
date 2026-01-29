@@ -1,10 +1,13 @@
-// App.tsx - COMPLETELY FIXED VERSION
+// App.tsx - FIXED WITH GALLERY ENROLLMENT
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer, NavigationContainerRef } from '@react-navigation/native';
 import { Alert, View, Platform, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import notifee, { EventType, AndroidImportance, Event } from '@notifee/react-native';
+
+// ✅ FIXED: Correct import for react-native-quick-base64
+
 
 // --- Firebase Imports ---
 import './src/firebase/config';
@@ -20,7 +23,11 @@ import { startSessionListener, initializeStudentClass } from './src/utils/notifT
 import { NotificationItemProps, NotificationType } from './src/types';
 
 // --- Pre-warm function ---
-import { prewarmVerification } from './src/services/FaceDetectionService';
+import FaceRecognitionService from './src/services/SimpleFaceService';
+
+// ✅ Set global polyfills
+global.atob = atob;
+global.btoa = btoa;
 
 // --- Navigation Ref ---
 type CombinedParamList = RootStackParamList & AuthStackParamList;
@@ -52,6 +59,7 @@ const linking = {
       CollegeRegistration: 'register',
       Login: 'login',
       Signup: 'signup',
+      EnrollFaceScreen: 'enroll-face', // ✅ Added gallery enrollment
     },
   },
 };
@@ -121,23 +129,23 @@ function App(): React.JSX.Element | null {
   }, [initializing]);
 
   // --- Pre-warm face verification cache on app start ---
-  useEffect(() => {
-    if (!user || initializing) return;
+  // useEffect(() => {
+  //   if (!user || initializing) return;
 
-    console.log('🔥 [App] Pre-warming face verification cache...');
+  //   console.log('🔥 [App] Pre-warming face verification cache...');
     
-    prewarmVerification()
-      .then(() => {
-        console.log('✅ [App] Face verification cache ready!');
-      })
-      .catch(error => {
-        console.warn('⚠️ [App] Pre-warm failed (non-critical):', error);
-      });
-  }, [user, initializing]);
+  //   FaceRecognitionService.prewarmVerification()
+  //     .then(() => {
+  //       console.log('✅ [App] Face verification cache ready!');
+  //     })
+  //     .catch((error: any) => {
+  //       console.warn('⚠️ [App] Pre-warm failed (non-critical):', error);
+  //     });
+  // }, [user, initializing]);
 
-  // ✅ FIXED: Complete Navigation Handler
+  // ✅ UPDATED: Navigation Handler with Enrollment Check
   const handleNavigationAction = useCallback(
-    (sessionId: string | undefined, action: string | undefined) => {
+    async (sessionId: string | undefined, action: string | undefined) => {
       if (!sessionId || !action) {
         console.warn('[App] handleNavigationAction: Missing sessionId or action.');
         return;
@@ -158,7 +166,7 @@ function App(): React.JSX.Element | null {
         }
       };
 
-      // ✅ ALL session actions → Face Verification FIRST with nextAction
+      // ✅ Session actions that require face verification
       const sessionActions = [
         'OPEN_SCANNER',
         'JOIN_SESSION_ACTION',
@@ -168,19 +176,73 @@ function App(): React.JSX.Element | null {
       ];
 
       if (sessionActions.includes(action)) {
-        console.log(`[App] 🔒 Redirecting to Face Verification for action: ${action}`);
+        console.log(`[App] 🔒 Session action detected: ${action}`);
         
-        tryNavigate('FaceScanScreen', { 
-          sessionId,
-          nextAction: action, // ✅ Pass action to determine post-verification route
-        });
+        // ✅ Check if user has enrolled face
+        try {
+          await FaceRecognitionService.loadEnrolledFaces();
+          const status = FaceRecognitionService.getEnrollmentStatus();
+          
+          if (status.count === 0) {
+            // ❌ No enrolled face - redirect to enrollment
+            console.log('[App] ❌ No enrolled face detected');
+            
+            Alert.alert(
+              '📸 Face Enrollment Required',
+              'Please enroll your face first to use attendance verification.',
+              [
+                {
+                  text: 'Enroll Now',
+                  onPress: () => {
+                    tryNavigate('EnrollFaceScreen', {});
+                  },
+                },
+                {
+                  text: 'Cancel',
+                  style: 'cancel',
+                },
+              ]
+            );
+            return;
+          }
+          
+          // ✅ Face enrolled - proceed to verification
+          console.log(`[App] ✅ Face enrolled (${status.count} face(s)). Proceeding to verification...`);
+          
+          tryNavigate('FaceScanScreen', { 
+            sessionId,
+            nextAction: action,
+          });
+          
+        } catch (error) {
+          console.error('[App] Error checking enrollment status:', error);
+          
+          // On error, still allow but warn
+          Alert.alert(
+            'Warning',
+            'Could not verify enrollment status. Continue anyway?',
+            [
+              {
+                text: 'Yes',
+                onPress: () => {
+                  tryNavigate('FaceScanScreen', { 
+                    sessionId,
+                    nextAction: action,
+                  });
+                },
+              },
+              {
+                text: 'Cancel',
+                style: 'cancel',
+              },
+            ]
+          );
+        }
       }
-      // --- Insights Action ---
       else if (action === 'VIEW_INSIGHTS') {
         console.log(`[App] 📊 Navigate to Insights for session ${sessionId}`);
         Alert.alert('Navigate', `Prototype: Open Insights for session ${sessionId}`);
       } 
-      // --- Unhandled Actions ---
       else {
         console.log(`[App] ⚠️ Unhandled action: ${action} for session ${sessionId}`);
         Alert.alert('Unknown Action', `Action "${action}" is not supported yet.`);
@@ -191,7 +253,6 @@ function App(): React.JSX.Element | null {
 
   // --- FCM & Notifee Listeners ---
   useEffect(() => {
-    // ✅ Foreground Message Listener
     const unsubscribeFCM = messaging().onMessage(async remoteMessage => {
       console.log('[App] FCM Message Received in Foreground:', remoteMessage);
       
@@ -228,39 +289,35 @@ function App(): React.JSX.Element | null {
       }
     });
 
-    // ✅ Background -> Foreground (App opened from notification)
     const unsubscribeOpenedApp = messaging().onNotificationOpenedApp(remoteMessage => {
-  console.log('[App] FCM Notification opened app from background:', remoteMessage.data);
-  
-  if (remoteMessage.data) {
-    setTimeout(() => {
-      handleNavigationAction(
-        remoteMessage.data?.sessionId as string | undefined,  // ✅ Optional chaining
-        remoteMessage.data?.action as string | undefined      // ✅ Optional chaining
-      );
-    }, 500);
-  }
-});
-
-    // ✅ Quit State -> Opened (App was completely closed)
-   // ✅ Quit State -> Opened (App was completely closed)
-messaging()
-  .getInitialNotification()
-  .then(remoteMessage => {
-    if (remoteMessage?.data) {
-      console.log('[App] FCM Notification opened app from quit state:', remoteMessage.data);
+      console.log('[App] FCM Notification opened app from background:', remoteMessage.data);
       
-      setTimeout(() => {
-        handleNavigationAction(
-          remoteMessage.data?.sessionId as string | undefined, // ✅ Add optional chaining
-          remoteMessage.data?.action as string | undefined      // ✅ Add optional chaining
-        );
-      }, 1500);
-    }
-  })
-  .catch(err => console.error('[App] getInitialNotification error:', err));
+      if (remoteMessage.data) {
+        setTimeout(() => {
+          handleNavigationAction(
+            remoteMessage.data?.sessionId as string | undefined,
+            remoteMessage.data?.action as string | undefined
+          );
+        }, 500);
+      }
+    });
 
-    // ✅ Notifee Foreground Event Listener
+    messaging()
+      .getInitialNotification()
+      .then(remoteMessage => {
+        if (remoteMessage?.data) {
+          console.log('[App] FCM Notification opened app from quit state:', remoteMessage.data);
+          
+          setTimeout(() => {
+            handleNavigationAction(
+              remoteMessage.data?.sessionId as string | undefined,
+              remoteMessage.data?.action as string | undefined
+            );
+          }, 1500);
+        }
+      })
+      .catch(err => console.error('[App] getInitialNotification error:', err));
+
     const unsubscribeNotifeeForeground = notifee.onForegroundEvent(
       ({ type, detail }: Event) => {
         if (type === EventType.DELIVERED) {
@@ -287,12 +344,10 @@ messaging()
       }
     );
 
-    // ✅ iOS: Register for remote notifications
     if (Platform.OS === 'ios') {
       messaging().registerDeviceForRemoteMessages();
     }
 
-    // ✅ Create Notification Channels (Android)
     notifee.createChannel({
       id: 'default',
       name: 'Default Channel',
@@ -313,7 +368,6 @@ messaging()
       importance: AndroidImportance.DEFAULT,
     });
 
-    // ✅ Cleanup
     return () => {
       unsubscribeFCM();
       unsubscribeNotifeeForeground();
@@ -335,26 +389,19 @@ messaging()
 
       try {
         console.log('🚀 [App] Setting up notifications for user:', user.uid);
-        
-        // Step 1: Initialize class (non-blocking)
         await initializeStudentClass();
         console.log('✅ [App] Class initialized');
-        
       } catch (error: any) {
         console.warn('⚠️ [App] Class initialization warning:', error.message);
-        // Don't block - let listener start anyway
       }
 
       try {
-        // Step 2: Start listener (always try, even if class init failed)
         console.log('🔄 [App] Starting session listener...');
         unsubscribeFirestore = await startSessionListener();
         console.log('✅ [App] Session listener active');
-        
       } catch (error: any) {
         console.error('❌ [App] Listener setup failed:', error);
         
-        // Only show alert for critical errors
         if (error.code === 'permission-denied') {
           Alert.alert(
             'Permission Error',
@@ -374,7 +421,6 @@ messaging()
     };
   }, [user, initializing]);
 
-  // --- Loading Screen ---
   if (initializing) {
     return (
       <View style={styles.loadingContainer}>
@@ -384,7 +430,6 @@ messaging()
     );
   }
 
-  // --- Main App Render ---
   return (
     <SafeAreaProvider>
       <NavigationContainer

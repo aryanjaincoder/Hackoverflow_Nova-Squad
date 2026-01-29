@@ -31,7 +31,7 @@ const SoundReceiver: React.FC<SoundReceiverProps> = ({
   route,
   targetSessionId: propSessionId, 
   onVerified: propOnVerified,
-  targetFrequency: propFrequency = 15000, // ✅ CHANGED: 18kHz → 15kHz (better phone support)
+  targetFrequency: propFrequency = 14500, // ✅ STEP 5: Updated from 17500 to 14500
   studentName: propStudentName,
   studentId: propStudentId
 }) => {
@@ -229,60 +229,48 @@ const SoundReceiver: React.FC<SoundReceiverProps> = ({
           }
         }
 
-        subscription = eventEmitter.addListener('FrequencyDetected', async (data) => {
-          if (hasVerified.current || !isMounted.current) return;
+       subscription = eventEmitter.addListener('FrequencyDetected', async (data) => {
+    if (hasVerified.current || !isMounted.current) return;
 
-          setMagnitude(data.magnitude);
+    setMagnitude(data.magnitude);
 
-          // ✅ INSTANT VERIFICATION: Only 1 strong detection needed!
-          if (data.detected) {
-            consecutiveDetections.current += 1;
-            const count = consecutiveDetections.current;
-            setDetectionCount(count);
+    if (data.detected) {
+        consecutiveDetections.current += 1;
+        const count = consecutiveDetections.current;
+        setDetectionCount(count);
 
-            console.log(`⚡⚡⚡ DETECTION #${count}`);
-
-            // ✅ CHANGED: 2 → 1 detection! BLAZING FAST!
-            if (count >= 1 && !hasVerified.current) {
-              hasVerified.current = true;
-              setStatus('⚡ VERIFYING...');
-              
-              console.log('⚡⚡⚡ INSTANT VERIFICATION!');
-              
-              // Stop detector immediately
-              try {
+        // 🔥 INSTANT VERIFICATION (1 detection = success)
+        if (count >= 1 && !hasVerified.current) {  // Was: count >= 2
+            hasVerified.current = true;
+            setStatus('⚡ VERIFYING...');
+            
+            try {
                 FrequencyDetector.stopDetection();
-              } catch (e) {}
-              
-              // Parallel execution
-              await Promise.all([
+            } catch (e) {}
+            
+            await Promise.all([
                 markAttendanceInstantly(),
                 sendVerifiedSignal()
-              ]);
-              
-              setStatus('✅ DONE!');
-              
-              // Instant callback
-              if (isMounted.current) {
+            ]);
+            
+            setStatus('✅ DONE!');
+            
+            if (isMounted.current) {
                 handleVerified(sessionId);
-              }
-            } else if (count === 1) {
-              // Send detection signal on first hit (non-blocking)
-              sendDetectionSignal();
             }
-          } else {
-            // ✅ AGGRESSIVE DECAY: Reset faster to avoid false positives
-            if (consecutiveDetections.current > 0) {
-              consecutiveDetections.current = Math.max(0, consecutiveDetections.current - 1);
-              setDetectionCount(Math.floor(consecutiveDetections.current));
-            }
-          }
-        });
+        }
+    } else {
+        if (consecutiveDetections.current > 0) {
+            consecutiveDetections.current = Math.max(0, consecutiveDetections.current - 1);
+            setDetectionCount(Math.floor(consecutiveDetections.current));
+        }
+    }
+});
 
         // Start detection
         await FrequencyDetector.startDetection(targetFrequency);
         setStatus('⚡ READY');
-        console.log('⚡⚡⚡ ULTRA FAST MODE @', targetFrequency, 'Hz');
+        console.log('⚡⚡⚡ MULTI-TONE MODE @', targetFrequency, 'Hz');
 
       } catch (error: any) {
         console.error('❌ Start error:', error);
@@ -317,7 +305,7 @@ const SoundReceiver: React.FC<SoundReceiverProps> = ({
     <View style={styles.container}>
       <View style={styles.statusContainer}>
         <Text style={styles.statusText}>
-          {status === '⚡ READY' && '⚡⚡⚡ ULTRA FAST MODE'}
+          {status === '⚡ READY' && '⚡⚡⚡ MULTI-TONE MODE'}
           {status === 'DETECTING' && '⚡⚡⚡ LOCKING...'}
           {status === '⚡ VERIFYING...' && '⚡⚡⚡ MARKING...'}
           {status === '✅ DONE!' && '✅✅✅ INSTANT SUCCESS!'}
@@ -329,12 +317,12 @@ const SoundReceiver: React.FC<SoundReceiverProps> = ({
         
         {detectionCount >= 1 && (
           <Text style={styles.detectionText}>
-            ⚡⚡⚡ INSTANT LOCK! 
+            ⚡⚡⚡ LOCKING SIGNAL! 
           </Text>
         )}
 
         <Text style={styles.debugText}>
-          {finalStudentName} | 1-TAP MODE
+          {finalStudentName} | MULTI-TONE DETECTION
         </Text>
       </View>
 
@@ -351,7 +339,7 @@ const SoundReceiver: React.FC<SoundReceiverProps> = ({
           />
         </View>
         <Text style={styles.meterText}>
-          {targetFrequency} Hz | ⚡ INSTANT MODE
+          Multi-Tone (14.5kHz) | ADSR SMOOTHING  {/* ✅ STEP 5: Updated text */}
         </Text>
       </View>
     </View>

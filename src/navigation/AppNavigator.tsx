@@ -20,6 +20,7 @@ import StudentHomeScreen from '../screens/Home/StudentHomeScreen';
 import AdminHomeScreen from '../screens/Home/AdminHomeScreen';
 import CollegeRegistrationScreen from '../screens/Registration/CollegeRegistration';
 import NotificationScreen from '../screens/Notifications/Notifications';
+import EnrollFaceScreen from '../screens/EnrollFaceScreen/EnrollFaceScreen';
 import BLECheckScreen from '../screens/BleScan/BLECheckScreen';
 import FaceScanScreen from '../screens/FaceScan/FaceScanScreen';
 import ScanQRScreen from '../screens/ScanQRScreen/ScanQRScreen';
@@ -50,6 +51,8 @@ export type RootStackParamList = {
   // --- Auth & Home ---
   Home: undefined;
   CollegeRegistration: undefined;
+  // --- Face Enrollment ---
+  EnrollFaceScreen: undefined;
   
   // --- Notifications ---
   Notifications: undefined;
@@ -58,10 +61,13 @@ export type RootStackParamList = {
   BLECheckScreen: { sessionId: string };
   
   // --- Face Verification (Gateway) ---
-  FaceScanScreen: { 
-    sessionId: string; 
-    nextAction?: string; // Determines post-verification route
-  };
+FaceScanScreen: { 
+  sessionId: string; 
+  nextAction?: string;
+  mode?: 'enroll' | 'verify';
+  userId?: string;
+  userName?: string;
+};
   
   // --- Student Attendance Screens (Mode-Specific) ---
   ScanQRScreen: { 
@@ -88,7 +94,8 @@ export type RootStackParamList = {
   P2PVerificationScreen: { sessionId: string; seatId: string };
   
   // --- Admin Screens ---
-  CreateSessionScreen: { mode?: 'QR' | 'NFC' | 'SOUND'; className?: string } | undefined;
+  CreateSessionScreen: { mode?: 'QR' | 'NFC' | 'SOUND'; className?: string ;
+  targetStudents?: string[]} | undefined;
   VerificationQueueScreen: undefined;
   QRSessionScreen: { sessionId: string; className: string; totalStudents: number };
   NFCSessionScreen: { sessionId: string; className: string };
@@ -211,16 +218,17 @@ const ScreenWrapper: React.FC<ScreenWrapperProps> = ({
       </View>
 
       <HamburgerMenu
-        isVisible={isMenuVisible}
-        onClose={handleMenuClose}
-        currentTheme={currentTheme}
-        onThemeToggle={handleThemeToggle}
-        onLogout={handleLogoutAndCloseMenu}
-        syncStatus={userData.syncStatus}
-        userName={userData.name}
-        userEmail={userData.email}
-        role={userData.role}
-      />
+  isVisible={isMenuVisible}
+  onClose={handleMenuClose}
+  navigation={navigation}  // <-- ADD THIS LINE
+  currentTheme={currentTheme}
+  onThemeToggle={handleThemeToggle}
+  onLogout={handleLogoutAndCloseMenu}
+  syncStatus={userData.syncStatus}
+  userName={userData.name}
+  userEmail={userData.email}
+  role={userData.role}
+/>
     </View>
   );
 };
@@ -361,6 +369,10 @@ const AppNavigator: React.FC<AppNavigatorProps> = ({
       <Stack.Screen name="CollegeRegistration">
         {renderScreen(CollegeRegistrationScreen, 'College Registration')}
       </Stack.Screen>
+      {/* ==================== FACE ENROLLMENT ==================== */}
+<Stack.Screen name="EnrollFaceScreen">
+  {renderScreen(EnrollFaceScreen, 'Face Enrollment')}
+</Stack.Screen>
       
       {/* ==================== NOTIFICATIONS ==================== */}
       <Stack.Screen name="Notifications">
@@ -373,9 +385,8 @@ const AppNavigator: React.FC<AppNavigatorProps> = ({
       </Stack.Screen>
       
       {/* ==================== FACE VERIFICATION (Gateway) ==================== */}
-      <Stack.Screen name="FaceScanScreen">
-        {renderScreen(FaceScanScreen, 'Face Verification')}
-      </Stack.Screen>
+      {/* ✅ CORRECT */}
+<Stack.Screen name="FaceScanScreen" component={renderScreen(FaceScanScreen, 'Face Verification')} />
       
       {/* ==================== STUDENT ATTENDANCE SCREENS (Mode-Specific) ==================== */}
       
